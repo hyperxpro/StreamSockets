@@ -1,0 +1,23 @@
+# Stage 1: Build the project
+FROM maven:3.9.9-amazoncorretto-21 AS build
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the source code
+COPY . .
+
+# Build the project
+RUN mvn -ntp -B clean package -DskipTests
+
+# Stage 2: Create the final image
+FROM amazoncorretto:21-al2023-headless
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the JAR files from the build stage
+COPY --from=build /app/server/server.jar /app/server.jar
+
+# Command to run the server JAR file
+CMD ["java", "-jar", "/app/server.jar"]
