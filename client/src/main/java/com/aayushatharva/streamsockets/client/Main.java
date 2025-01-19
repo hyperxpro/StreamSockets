@@ -17,9 +17,11 @@
 
 package com.aayushatharva.streamsockets.client;
 
+import javax.net.ssl.SSLException;
+
 public final class Main {
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws SSLException {
         UdpServer udpServer = new UdpServer();
         udpServer.start();
     }
