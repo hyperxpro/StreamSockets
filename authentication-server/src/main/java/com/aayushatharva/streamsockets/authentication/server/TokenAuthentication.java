@@ -91,6 +91,16 @@ public final class TokenAuthentication {
         }
     }
 
+    /**
+     * Release an account.
+     *
+     * @param account The account to release.
+     * @return true if the account was released, false otherwise.
+     */
+    public boolean releaseAccount(Accounts.Account account) {
+        return activeAccounts.remove(account);
+    }
+
     private static boolean isIpInCidr(String ip, String cidr) {
         IPAddressString ipAddressString = new IPAddressString(ip);
         IPAddressString cidrAddressString = new IPAddressString(cidr);

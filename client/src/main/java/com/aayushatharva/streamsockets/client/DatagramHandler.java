@@ -39,7 +39,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 @Log4j2
 @ChannelHandler.Sharable
-final class DatagramHandler extends ChannelInboundHandlerAdapter {
+public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
     private final Queue<BinaryWebSocketFrame> queuedFrames = new ConcurrentLinkedQueue<>();
     private final EventLoopGroup eventLoopGroup;
@@ -65,7 +65,7 @@ final class DatagramHandler extends ChannelInboundHandlerAdapter {
             }
 
             BinaryWebSocketFrame binaryWebSocketFrame = new BinaryWebSocketFrame(packet.content().retain());
-            if (wsChannel != null && wsChannel.isActive() && webSocketClientHandler.handshakeFuture().isSuccess()) {
+            if (wsChannel != null && wsChannel.isActive() && webSocketClientHandler.websocketHandshakeFuture().isSuccess()) {
                 wsChannel.writeAndFlush(binaryWebSocketFrame);
             } else {
                 queuedFrames.add(binaryWebSocketFrame);
@@ -105,7 +105,7 @@ final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 wsChannel = future.channel();
                 webSocketClientHandler = wsChannel.pipeline().get(WebSocketClientHandler.class);
 
-                webSocketClientHandler.handshakeFuture().addListener((ChannelFutureListener) handshakeFuture -> {
+                webSocketClientHandler.websocketHandshakeFuture().addListener((ChannelFutureListener) handshakeFuture -> {
                     if (handshakeFuture.isSuccess()) {
                         // Send queued frames
                         while (!queuedFrames.isEmpty()) {
@@ -118,5 +118,9 @@ final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 });
             }
         });
+    }
+
+    public ChannelFuture webSocketClientFuture() {
+        return webSocketClientFuture;
     }
 }

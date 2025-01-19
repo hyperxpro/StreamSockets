@@ -15,11 +15,12 @@
  *
  */
 
-package com.aayushatharva.streamsockets.server;
+package com.aayushatharva.streamsockets;
 
 import com.aayushatharva.streamsockets.authentication.server.Accounts;
 import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
 import com.aayushatharva.streamsockets.client.UdpServer;
+import com.aayushatharva.streamsockets.server.WebSocketServer;
 import lombok.extern.log4j.Log4j2;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -49,7 +50,7 @@ public class EndToEndTest {
     private UdpServer udpServer;
 
     @BeforeAll
-    void setup() throws Exception {
+    void setup() {
         udpEchoServer.start();
 
         InputStream inputStream = getClass().getClassLoader().getResourceAsStream("accounts.yml");

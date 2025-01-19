@@ -19,24 +19,15 @@ package com.aayushatharva.streamsockets.server;
 
 import com.aayushatharva.streamsockets.authentication.server.Accounts;
 import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
-import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.Unpooled;
-import io.netty.channel.ChannelFactory;
-import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.epoll.Epoll;
-import io.netty.channel.epoll.EpollDatagramChannel;
-import io.netty.channel.socket.DatagramChannel;
-import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
-import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.util.AttributeKey;
+import lombok.extern.log4j.Log4j2;
 
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 
 import static io.netty.channel.ChannelFutureListener.CLOSE;
@@ -45,6 +36,7 @@ import static io.netty.handler.codec.http.HttpResponseStatus.FORBIDDEN;
 import static io.netty.handler.codec.http.HttpResponseStatus.UNAUTHORIZED;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
+@Log4j2
 final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
 
     private final TokenAuthentication tokenAuthentication;
@@ -84,6 +76,13 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                     ctx.writeAndFlush(FORBIDDEN_RESPONSE.retainedDuplicate()).addListener(CLOSE);
                     return;
                 }
+
+                // Release account when the channel is closed
+                ctx.channel().closeFuture().addListener((ChannelFutureListener) future -> {
+                    if (tokenAuthentication.releaseAccount(account)) {
+                        log.info("{} disconnected from the server", account.getName());
+                    }
+                });
 
                 ctx.pipeline().remove(this);
                 ctx.fireChannelRead(msg);
