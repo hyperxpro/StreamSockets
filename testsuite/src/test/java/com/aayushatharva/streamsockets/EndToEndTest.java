@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.yaml.snakeyaml.Yaml;
 
+import javax.net.ssl.SSLException;
 import java.io.InputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -50,7 +51,7 @@ public class EndToEndTest {
     private UdpServer udpServer;
 
     @BeforeAll
-    void setup() {
+    void setup() throws SSLException {
         udpEchoServer.start();
 
         InputStream inputStream = getClass().getClassLoader().getResourceAsStream("accounts.yml");

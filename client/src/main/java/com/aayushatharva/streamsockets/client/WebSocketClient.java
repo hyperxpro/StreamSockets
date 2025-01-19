@@ -27,9 +27,13 @@ import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.handler.codec.http.websocketx.WebSocketClientHandshaker;
+import io.netty.handler.ssl.OpenSsl;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslProvider;
 import lombok.extern.log4j.Log4j2;
 
+import javax.net.ssl.SSLException;
 import java.net.URI;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
@@ -37,14 +41,26 @@ import static com.aayushatharva.streamsockets.common.Utils.envValue;
 @Log4j2
 final class WebSocketClient {
 
-    ChannelFuture start(EventLoopGroup eventLoopGroup, DatagramHandler datagramHandler) {
+    static {
+        log.info("OpenSSL available: {}", OpenSsl.isAvailable());
+    }
+
+    ChannelFuture start(EventLoopGroup eventLoopGroup, DatagramHandler datagramHandler) throws SSLException {
         URI uri = URI.create(envValue("WEBSOCKET_URI", "ws://localhost:8080/tunnel"));
+
+        SslContext sslContext = null;
+        if (uri.getScheme().equals("wss")) {
+            sslContext = SslContextBuilder.forClient()
+                    .protocols("TLSv1.3", "TLSv1.2")
+                    .sslProvider(OpenSsl.isAvailable() ? SslProvider.OPENSSL : SslProvider.JDK)
+                    .build();
+        }
 
         Bootstrap bootstrap = new Bootstrap()
                 .group(eventLoopGroup)
                 .channelFactory(channelFactory())
                 .option(ChannelOption.TCP_NODELAY, true)
-                .handler(new WebSocketClientInitializer(datagramHandler, uri));
+                .handler(new WebSocketClientInitializer(datagramHandler, uri, sslContext));
 
         log.info("Connecting to WebSocketServer at {}:{}", uri.getHost(), uri.getPort());
         ChannelFuture channelFuture = bootstrap.connect(uri.getHost(), uri.getPort());

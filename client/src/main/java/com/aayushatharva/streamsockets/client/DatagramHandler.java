@@ -30,6 +30,7 @@ import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
 
+import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -50,7 +51,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     private ChannelFuture webSocketClientFuture;
     private WebSocketClientHandler webSocketClientHandler;
 
-    DatagramHandler(EventLoopGroup eventLoopGroup) {
+    DatagramHandler(EventLoopGroup eventLoopGroup) throws SSLException {
         this.eventLoopGroup = eventLoopGroup;
         newWebSocketConnection();
     }
@@ -94,7 +95,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
         }
     }
 
-    private void newWebSocketConnection() {
+    private void newWebSocketConnection() throws SSLException {
         if (wsChannel != null) {
             wsChannel.close();
         }
