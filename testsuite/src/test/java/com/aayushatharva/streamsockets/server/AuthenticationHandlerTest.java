@@ -28,6 +28,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.yaml.snakeyaml.Yaml;
 
+import javax.net.ssl.SSLException;
 import java.io.InputStream;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -41,7 +42,7 @@ public class AuthenticationHandlerTest {
     private UdpServer udpServer;
 
     @BeforeAll
-    void setup() {
+    void setup() throws SSLException {
 
         InputStream inputStream = getClass().getClassLoader().getResourceAsStream("accounts.yml");
         assertNotNull(inputStream, "Configuration file not found in resources");

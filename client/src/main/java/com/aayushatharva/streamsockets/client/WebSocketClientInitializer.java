@@ -26,8 +26,13 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshaker;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakerFactory;
 import io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslHandler;
 
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
 import java.net.URI;
+import java.security.NoSuchAlgorithmException;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static io.netty.handler.codec.http.websocketx.WebSocketVersion.V13;
@@ -36,18 +41,30 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
 
     private final DatagramHandler datagramHandler;
     private final URI uri;
+    private final SslContext sslContext;
 
-    WebSocketClientInitializer(DatagramHandler datagramHandler, URI uri) {
+    WebSocketClientInitializer(DatagramHandler datagramHandler, URI uri, SslContext sslContext) {
         this.datagramHandler = datagramHandler;
         this.uri = uri;
+        this.sslContext = sslContext;
     }
 
     @Override
-    protected void initChannel(SocketChannel channel) {
+    protected void initChannel(SocketChannel channel) throws NoSuchAlgorithmException {
         HttpHeaders headers = new DefaultHttpHeaders();
         headers.add("X-Auth-Type", "Token");
         headers.add("X-Auth-Token", envValue("AUTH_TOKEN", ""));
         headers.add("X-Auth-Route", envValue("ROUTE", "127.0.0.1:8888"));
+
+        if (sslContext != null) {
+            SSLEngine sslEngine = sslContext.newEngine(channel.alloc(), uri.getHost(), uri.getPort());
+
+            SSLParameters sslParams = new SSLParameters();
+            sslParams.setEndpointIdentificationAlgorithm("HTTPS");
+            sslEngine.setSSLParameters(sslParams);
+
+            channel.pipeline().addFirst(new SslHandler(sslEngine));
+        }
 
         WebSocketClientHandshaker handshaker = WebSocketClientHandshakerFactory.newHandshaker(uri, V13, null, false, headers);
 

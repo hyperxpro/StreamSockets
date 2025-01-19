@@ -31,6 +31,7 @@ import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.channel.unix.UnixChannelOption;
 import lombok.extern.log4j.Log4j2;
 
+import javax.net.ssl.SSLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -46,7 +47,7 @@ public final class UdpServer {
     private List<ChannelFuture> channelFutures;
     private DatagramHandler datagramHandler;
 
-    public void start() {
+    public void start() throws SSLException {
         int threads = envValueAsInt("THREADS", Epoll.isAvailable() ? Runtime.getRuntime().availableProcessors() * 2 : 1);
         eventLoopGroup = eventLoopGroup(threads);
 
