@@ -31,18 +31,18 @@ import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
-import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 import static io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE;
 
 /**
  * This class receives {@link WebSocketFrame} from the WebSocket server and sends them to the UDP client.
  */
 @Log4j2
-final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
+public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     private final DatagramHandler datagramHandler;
 
-    private ChannelPromise handshakeFuture;
+    private ChannelPromise websocketHandshakeFuture;
+    private ChannelPromise authenticationFuture;
 
     WebSocketClientHandler(DatagramHandler datagramHandler) {
         this.datagramHandler = datagramHandler;
@@ -50,7 +50,8 @@ final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) {
-        handshakeFuture = ctx.newPromise();
+        websocketHandshakeFuture = ctx.newPromise();
+        authenticationFuture = ctx.newPromise();
     }
 
     @Override
@@ -63,7 +64,7 @@ final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             requestJson.addProperty("port", Integer.parseInt(route.split(":")[1]));
 
             ctx.writeAndFlush(new TextWebSocketFrame(requestJson.toString()));
-            handshakeFuture.setSuccess();
+            websocketHandshakeFuture.setSuccess();
             return;
         }
         super.userEventTriggered(ctx, evt);
@@ -77,8 +78,10 @@ final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             // Check if the connection was successful
             if (requestJson.get("success").getAsBoolean() && requestJson.get("message").getAsString().equalsIgnoreCase("connected")) {
                 log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
+                authenticationFuture.setSuccess();
             } else {
                 log.error("Failed to connect to remote server: {}", requestJson.get("message").getAsString());
+                authenticationFuture.setFailure(new Exception(requestJson.get("message").getAsString()));
                 System.exit(1);
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
@@ -97,12 +100,16 @@ final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         log.error("WebSocketClientHandler exception", cause);
 
-        if (!handshakeFuture.isDone()) {
-            handshakeFuture.setFailure(cause);
+        if (!websocketHandshakeFuture.isDone()) {
+            websocketHandshakeFuture.setFailure(cause);
         }
     }
 
-    ChannelFuture handshakeFuture() {
-        return handshakeFuture;
+    public ChannelFuture websocketHandshakeFuture() {
+        return websocketHandshakeFuture;
+    }
+
+    public ChannelFuture authenticationFuture() {
+        return authenticationFuture;
     }
 }

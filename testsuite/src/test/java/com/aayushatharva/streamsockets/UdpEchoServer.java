@@ -15,7 +15,7 @@
  *
  */
 
-package com.aayushatharva.streamsockets.server;
+package com.aayushatharva.streamsockets;
 
 import lombok.extern.log4j.Log4j2;
 

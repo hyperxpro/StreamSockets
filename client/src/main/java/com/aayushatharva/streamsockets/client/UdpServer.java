@@ -32,6 +32,7 @@ import io.netty.channel.unix.UnixChannelOption;
 import lombok.extern.log4j.Log4j2;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -42,13 +43,14 @@ import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 public final class UdpServer {
 
     private EventLoopGroup eventLoopGroup;
-    private List<ChannelFuture> udpFutures;
+    private List<ChannelFuture> channelFutures;
+    private DatagramHandler datagramHandler;
 
     public void start() {
         int threads = envValueAsInt("THREADS", Epoll.isAvailable() ? Runtime.getRuntime().availableProcessors() * 2 : 1);
         eventLoopGroup = eventLoopGroup(threads);
 
-        DatagramHandler datagramHandler = new DatagramHandler(eventLoopGroup);
+        datagramHandler = new DatagramHandler(eventLoopGroup);
 
         Bootstrap bootstrap = new Bootstrap()
                 .group(eventLoopGroup)
@@ -64,7 +66,7 @@ public final class UdpServer {
         String bindAddress = envValue("BIND_ADDRESS", "0.0.0.0");
         int bindPort = envValueAsInt("BIND_PORT", 9000);
 
-        udpFutures = new ArrayList<>();
+        channelFutures = new ArrayList<>();
         for (int i = 0; i < threads; i++) {
             ChannelFuture channelFuture = bootstrap.bind(bindAddress, bindPort).addListener((ChannelFutureListener) future -> {
                 if (future.isSuccess()) {
@@ -78,7 +80,7 @@ public final class UdpServer {
                 }
             });
 
-            udpFutures.add(channelFuture);
+            channelFutures.add(channelFuture);
         }
     }
 
@@ -99,11 +101,19 @@ public final class UdpServer {
     }
 
     public void stop() throws InterruptedException {
-        for (ChannelFuture future : udpFutures) {
+        for (ChannelFuture future : channelFutures) {
             future.channel().close().sync();
         }
 
         eventLoopGroup.shutdownGracefully();
         log.info("UDP Server stopped");
+    }
+
+    public List<ChannelFuture> channelFutures() {
+        return Collections.unmodifiableList(channelFutures);
+    }
+
+    public DatagramHandler datagramHandler() {
+        return datagramHandler;
     }
 }
