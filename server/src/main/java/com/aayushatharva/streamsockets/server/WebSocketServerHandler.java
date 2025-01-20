@@ -34,6 +34,7 @@ import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
@@ -68,7 +69,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
             channel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content(), socketAddress));
         } else if (msg instanceof PingWebSocketFrame pingWebSocketFrame) {
-            ctx.writeAndFlush(pingWebSocketFrame);
+            ctx.writeAndFlush(new PongWebSocketFrame(pingWebSocketFrame.content()));
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
