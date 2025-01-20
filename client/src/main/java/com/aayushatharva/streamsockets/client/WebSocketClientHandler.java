@@ -57,13 +57,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
         if (evt instanceof ClientHandshakeStateEvent event && event == HANDSHAKE_COMPLETE) {
-            String route = envValue("ROUTE", "127.0.0.1:8888");
-
-            JsonObject requestJson = new JsonObject();
-            requestJson.addProperty("address", route.split(":")[0]);
-            requestJson.addProperty("port", Integer.parseInt(route.split(":")[1]));
-
-            ctx.writeAndFlush(new TextWebSocketFrame(requestJson.toString()));
+            newUdpConnection(ctx);
             websocketHandshakeFuture.setSuccess();
             return;
         }
@@ -103,6 +97,21 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
         if (!websocketHandshakeFuture.isDone()) {
             websocketHandshakeFuture.setFailure(cause);
         }
+    }
+
+    void newUdpConnection(ChannelHandlerContext ctx) {
+        String route = envValue("ROUTE", "127.0.0.1:8888");
+
+        JsonObject requestJson = new JsonObject();
+        requestJson.addProperty("address", route.split(":")[0]);
+        requestJson.addProperty("port", Integer.parseInt(route.split(":")[1]));
+
+        ctx.writeAndFlush(new TextWebSocketFrame(requestJson.toString()));
+        authenticationFuture = ctx.newPromise();
+    }
+
+    boolean isReadyForWrite() {
+        return websocketHandshakeFuture.isSuccess() && authenticationFuture.isSuccess();
     }
 
     public ChannelFuture websocketHandshakeFuture() {
