@@ -27,6 +27,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
@@ -105,6 +106,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
             datagramHandler.writeToUdpClient(binaryWebSocketFrame.content());
+        } else if (msg instanceof PongWebSocketFrame pongWebSocketFrame) {
+            pongWebSocketFrame.content().release();
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
