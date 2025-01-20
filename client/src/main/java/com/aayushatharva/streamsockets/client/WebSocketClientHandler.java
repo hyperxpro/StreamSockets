@@ -17,7 +17,6 @@
 
 package com.aayushatharva.streamsockets.client;
 
-import com.aayushatharva.streamsockets.common.Utils;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import io.netty.buffer.ByteBuf;
@@ -40,7 +39,6 @@ import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 import static io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
-import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * This class receives {@link WebSocketFrame} from the WebSocket server and sends them to the UDP client.
