@@ -7,9 +7,10 @@ This is useful for situations where you need to send UDP packets over a network 
 #### Server
 ```yaml
 services:
-  stream:
+  streamsockets-server:
     image: hyperxpro/streamsockets:server-1.0.0
     container_name: streamsockets-server
+    restart: unless-stopped
     environment:
       - ACCOUNTS_CONFIG_FILE=/app/accounts.yml
       - CLIENT_IP_HEADER=X-Forwarded-For
@@ -29,9 +30,10 @@ services:
 
 ```yaml
 services:
-  stream:
+  streamsockets-client:
     image: hyperxpro/streamsockets:client-1.0.0
     container_name: streamsockets-client
+    restart: unless-stopped
     environment:
       - THREADS=4
       - BIND_ADDRESS=0.0.0.0
@@ -39,6 +41,7 @@ services:
       - WEBSOCKET_URI=ws://localhost:8080/tunnel
       - AUTH_TOKEN=secret
       - ROUTE=127.0.0.1:8888
+      - PING_INTERVAL_MILLIS=1000
     ports:
       - "8888:8888/udp"
 ```
@@ -60,6 +63,7 @@ services:
 - `WEBSOCKET_URI` - URI of the WebSocket endpoint. 
 - `AUTH_TOKEN` - Authentication token.
 - `ROUTE` - Route to the endpoint.
+- `PING_INTERVAL_MILLIS` - Interval in milliseconds to send ping messages to the server.
 
 ### Accounts Configuration
 
