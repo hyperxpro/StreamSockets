@@ -32,6 +32,7 @@ import io.netty.handler.ssl.SslHandler;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLParameters;
 import java.net.URI;
+import java.security.NoSuchAlgorithmException;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static io.netty.handler.codec.http.websocketx.WebSocketVersion.V13;
@@ -49,7 +50,7 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
     }
 
     @Override
-    protected void initChannel(SocketChannel channel) {
+    protected void initChannel(SocketChannel channel) throws NoSuchAlgorithmException {
         HttpHeaders headers = new DefaultHttpHeaders();
         headers.add("X-Auth-Type", "Token");
         headers.add("X-Auth-Token", envValue("AUTH_TOKEN", ""));

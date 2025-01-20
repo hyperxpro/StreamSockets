@@ -56,7 +56,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof TextWebSocketFrame textWebSocketFrame) {
-            // Close existing connection if any and create a new connection
+            // Close existing connection if any and create a new connectiona
             // This is done to prevent multiple connections to the same remote server
             if (socketAddress != null) {
                 channel.close().addListener((ChannelFutureListener) future -> {
