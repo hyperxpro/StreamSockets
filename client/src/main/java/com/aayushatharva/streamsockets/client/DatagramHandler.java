@@ -63,10 +63,22 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
             if (socketAddress == null) {
                 socketAddress = packet.sender();
                 udpChannel = ctx.channel();
+            } else if (!socketAddress.equals(packet.sender())) {
+                webSocketClientHandler.newUdpConnection(ctx);
+                socketAddress = packet.sender();
+
+                webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) future -> {
+                    if (future.isSuccess()) {
+                        // Send queued frames
+                        while (!queuedFrames.isEmpty()) {
+                            wsChannel.writeAndFlush(queuedFrames.poll());
+                        }
+                    }
+                });
             }
 
             BinaryWebSocketFrame binaryWebSocketFrame = new BinaryWebSocketFrame(packet.content().retain());
-            if (wsChannel != null && wsChannel.isActive() && webSocketClientHandler.websocketHandshakeFuture().isSuccess()) {
+            if (wsChannel != null && wsChannel.isActive() && webSocketClientHandler.isReadyForWrite()) {
                 wsChannel.writeAndFlush(binaryWebSocketFrame);
             } else {
                 queuedFrames.add(binaryWebSocketFrame);
@@ -106,7 +118,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 wsChannel = future.channel();
                 webSocketClientHandler = wsChannel.pipeline().get(WebSocketClientHandler.class);
 
-                webSocketClientHandler.websocketHandshakeFuture().addListener((ChannelFutureListener) handshakeFuture -> {
+                webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) handshakeFuture -> {
                     if (handshakeFuture.isSuccess()) {
                         // Send queued frames
                         while (!queuedFrames.isEmpty()) {

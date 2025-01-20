@@ -50,52 +50,13 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof TextWebSocketFrame textWebSocketFrame) {
-
-            // Check if already connected to a remote server
+            // Close existing connection if any and create a new connection
+            // This is done to prevent multiple connections to the same remote server
             if (socketAddress != null) {
-                log.warn("{} already connected to a remote server: {}", ctx.channel().remoteAddress(), socketAddress);
-
-                JsonObject responseJson = new JsonObject();
-                responseJson.addProperty("success", false);
-                responseJson.addProperty("message", "Already connected to a remote server");
-
-                ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
-                return;
+                channel.close().addListener((ChannelFutureListener) future -> newConnection(textWebSocketFrame, ctx));
+            } else {
+                newConnection(textWebSocketFrame, ctx);
             }
-
-            // Validate address and port
-            try {
-                JsonObject requestJson = JsonParser.parseString(textWebSocketFrame.text()).getAsJsonObject();
-                socketAddress = new InetSocketAddress(requestJson.get("address").getAsString(), requestJson.get("port").getAsInt());
-            } catch (Exception e) {
-                JsonObject responseJson = new JsonObject();
-                responseJson.addProperty("success", false);
-                responseJson.addProperty("message", "Invalid address or port");
-
-                ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
-                return;
-            }
-
-            // Connect to remote server and send response
-            connectToRemote(ctx).addListener((ChannelFutureListener) future -> {
-
-                JsonObject responseJson = new JsonObject();
-                if (future.isSuccess()) {
-                    log.info("{} connected to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
-
-                    channel = future.channel();
-                    responseJson.addProperty("success", true);
-                    responseJson.addProperty("message", "connected");
-                    ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString()));
-                } else {
-                    log.error("{} failed to connect to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
-
-                    responseJson.addProperty("status", "failed");
-                    responseJson.addProperty("message", future.cause().getMessage());
-
-                    ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
-                }
-            });
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
             channel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content(), socketAddress));
         } else if (msg instanceof PingWebSocketFrame pingWebSocketFrame) {
@@ -113,6 +74,47 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         log.error("WebSocketServerHandler exception", cause);
+    }
+
+    private void newConnection(TextWebSocketFrame textWebSocketFrame, ChannelHandlerContext ctx) {
+        // Validate address and port
+        try {
+            JsonObject requestJson = JsonParser.parseString(textWebSocketFrame.text()).getAsJsonObject();
+            socketAddress = new InetSocketAddress(requestJson.get("address").getAsString(), requestJson.get("port").getAsInt());
+        } catch (Exception e) {
+            JsonObject responseJson = new JsonObject();
+            responseJson.addProperty("success", false);
+            responseJson.addProperty("message", "Invalid address or port");
+
+            ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
+            return;
+        }
+
+        // Connect to remote server and send response
+        connectToRemote(ctx).addListener((ChannelFutureListener) future -> {
+            JsonObject responseJson = new JsonObject();
+            if (future.isSuccess()) {
+                log.info("{} connected to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+
+                channel = future.channel();
+                responseJson.addProperty("success", true);
+                responseJson.addProperty("message", "connected");
+                ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString()));
+
+                // If the WebSocket connection is closed, close the UDP channel
+                ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
+                    log.info("{} disconnected from remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+                    channel.close();
+                });
+            } else {
+                log.error("{} failed to connect to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+
+                responseJson.addProperty("status", "failed");
+                responseJson.addProperty("message", future.cause().getMessage());
+
+                ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
+            }
+        });
     }
 
     private ChannelFuture connectToRemote(ChannelHandlerContext ctx) {
