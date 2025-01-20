@@ -17,12 +17,10 @@
 
 package com.aayushatharva.streamsockets.server;
 
-import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
-
 public final class Main {
 
     public static void main(String[] args) {
         WebSocketServer webSocketServer = new WebSocketServer();
-        webSocketServer.start(new TokenAuthentication("E:\\Programming\\StreamSockets\\server\\src\\main\\resources\\accounts.yml"));
+        webSocketServer.start();
     }
 }
