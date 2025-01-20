@@ -17,6 +17,7 @@
 
 package com.aayushatharva.streamsockets.server;
 
+import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import io.netty.bootstrap.Bootstrap;
@@ -44,8 +45,13 @@ import static io.netty.channel.ChannelFutureListener.CLOSE;
 @Log4j2
 final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
 
+    private final TokenAuthentication tokenAuthentication;
     private InetSocketAddress socketAddress;
     private Channel channel;
+
+    WebSocketServerHandler(TokenAuthentication tokenAuthentication) {
+        this.tokenAuthentication = tokenAuthentication;
+    }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
@@ -53,7 +59,9 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
             // Close existing connection if any and create a new connection
             // This is done to prevent multiple connections to the same remote server
             if (socketAddress != null) {
-                channel.close().addListener((ChannelFutureListener) future -> newConnection(textWebSocketFrame, ctx));
+                channel.close().addListener((ChannelFutureListener) future -> {
+                    newConnection(textWebSocketFrame, ctx);
+                });
             } else {
                 newConnection(textWebSocketFrame, ctx);
             }
@@ -80,7 +88,17 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         // Validate address and port
         try {
             JsonObject requestJson = JsonParser.parseString(textWebSocketFrame.text()).getAsJsonObject();
-            socketAddress = new InetSocketAddress(requestJson.get("address").getAsString(), requestJson.get("port").getAsInt());
+            String address = requestJson.get("address").getAsString();
+            int port = requestJson.get("port").getAsInt();
+            socketAddress = new InetSocketAddress(address, port);
+
+            // Check if the route is allowed
+            if (!tokenAuthentication.containsRoute(address + ':' + port)) {
+                JsonObject responseJson = new JsonObject();
+                responseJson.addProperty("success", false);
+                responseJson.addProperty("message", "Route is not allowed");
+                ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
+            }
         } catch (Exception e) {
             JsonObject responseJson = new JsonObject();
             responseJson.addProperty("success", false);

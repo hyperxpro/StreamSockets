@@ -80,6 +80,22 @@ public final class TokenAuthentication {
         return null;
     }
 
+    /**
+     * Check if the accounts contain a route.
+     *
+     * @param route    The route to check.
+     * @return true if the accounts contain the route, false otherwise.
+     */
+    public boolean containsRoute(String route) {
+        return accounts.getAccounts().stream().anyMatch(account -> account.getRoutes().contains(route));
+    }
+
+    /**
+     * Lease an account.
+     *
+     * @param account The account to lease.
+     * @return true if the account was leased, false otherwise.
+     */
     public boolean leaseAccount(Accounts.Account account) {
         if (account == null) {
             return false;

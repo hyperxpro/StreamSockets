@@ -43,6 +43,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     private ChannelPromise websocketHandshakeFuture;
     private ChannelPromise authenticationFuture;
+    private ChannelHandlerContext ctx;
 
     WebSocketClientHandler(DatagramHandler datagramHandler) {
         this.datagramHandler = datagramHandler;
@@ -52,12 +53,13 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     public void handlerAdded(ChannelHandlerContext ctx) {
         websocketHandshakeFuture = ctx.newPromise();
         authenticationFuture = ctx.newPromise();
+        this.ctx = ctx;
     }
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
         if (evt instanceof ClientHandshakeStateEvent event && event == HANDSHAKE_COMPLETE) {
-            newUdpConnection(ctx);
+            newUdpConnection();
             websocketHandshakeFuture.setSuccess();
             return;
         }
@@ -68,7 +70,6 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof TextWebSocketFrame textWebSocketFrame) {
             JsonObject requestJson = JsonParser.parseString(textWebSocketFrame.text()).getAsJsonObject();
-
             // Check if the connection was successful
             if (requestJson.get("success").getAsBoolean() && requestJson.get("message").getAsString().equalsIgnoreCase("connected")) {
                 log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
@@ -99,7 +100,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
         }
     }
 
-    void newUdpConnection(ChannelHandlerContext ctx) {
+    void newUdpConnection() {
+        authenticationFuture = ctx.newPromise();
         String route = envValue("ROUTE", "127.0.0.1:8888");
 
         JsonObject requestJson = new JsonObject();
@@ -107,7 +109,6 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
         requestJson.addProperty("port", Integer.parseInt(route.split(":")[1]));
 
         ctx.writeAndFlush(new TextWebSocketFrame(requestJson.toString()));
-        authenticationFuture = ctx.newPromise();
     }
 
     boolean isReadyForWrite() {

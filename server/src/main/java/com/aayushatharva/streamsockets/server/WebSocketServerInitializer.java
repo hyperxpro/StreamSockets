@@ -23,7 +23,6 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
-import io.netty.handler.stream.ChunkedWriteHandler;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
@@ -42,6 +41,6 @@ final class WebSocketServerInitializer extends ChannelInitializer<SocketChannel>
         channel.pipeline().addLast(new HttpObjectAggregator(envValueAsInt("HTTP_MAX_CONTENT_LENGTH", 65536)));
         channel.pipeline().addLast(new AuthenticationHandler(tokenAuthentication));
         channel.pipeline().addLast(new WebSocketServerProtocolHandler(envValue("WS_PATH", "/tunnel")));
-        channel.pipeline().addLast(new WebSocketServerHandler());
+        channel.pipeline().addLast(new WebSocketServerHandler(tokenAuthentication));
     }
 }

@@ -40,7 +40,7 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
 
     private final TokenAuthentication tokenAuthentication;
-    private static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, UNAUTHORIZED, Unpooled.wrappedBuffer("Unauthorized".getBytes()));
+    static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, UNAUTHORIZED, Unpooled.wrappedBuffer("Unauthorized".getBytes()));
     private static final FullHttpResponse FORBIDDEN_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, FORBIDDEN, Unpooled.wrappedBuffer("Failed to lease account".getBytes()));
     private static final FullHttpResponse BAD_REQUEST_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, BAD_REQUEST, Unpooled.wrappedBuffer("Invalid authentication type".getBytes()));
 
