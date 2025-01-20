@@ -59,7 +59,10 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof DatagramPacket packet) {
-            // If the socket address is not set, set it to the sender of the packet
+            // If the socket address is not set, set it to the sender of the packet and the UDP channel to the current channel.
+            // This happens when the first packet is received on the UDP channel.
+            // If the sender of the packet is different from the current socket address, tell the WebSocket Server to create a new connection.
+            // This happens when the client creates new connections to the UDP server.
             if (socketAddress == null) {
                 socketAddress = packet.sender();
                 udpChannel = ctx.channel();
@@ -67,17 +70,29 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 webSocketClientHandler.newUdpConnection();
                 socketAddress = packet.sender();
 
+                // Wait for the WebSocket connection to finish authentication before sending queued frames.
                 webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) future -> {
+
+                    // If the future is successful, send the queued frames.
+                    // if the future is not successful, log the error and exit the JVM.
                     if (future.isSuccess()) {
+                        log.debug("WebSocket connection authenticated successfully, sending queued frames");
+
                         // Send queued frames
                         while (!queuedFrames.isEmpty()) {
                             wsChannel.writeAndFlush(queuedFrames.poll());
                         }
+                    } else {
+                        log.error("Failed to authenticate WebSocket connection", future.cause());
+                        System.exit(1);
                     }
                 });
             }
 
             BinaryWebSocketFrame binaryWebSocketFrame = new BinaryWebSocketFrame(packet.content().retain());
+
+            // If the WebSocket channel is active and ready for write, send the frame directly.
+            // Else add the frame to the queue.
             if (wsChannel != null && wsChannel.isActive() && webSocketClientHandler.isReadyForWrite()) {
                 wsChannel.writeAndFlush(binaryWebSocketFrame);
             } else {
@@ -96,7 +111,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     /**
      * Write and flush a {@link DatagramPacket} to the UDP client.
      */
-    public void writeToClient(ByteBuf byteBuf) {
+    void writeToUdpClient(ByteBuf byteBuf) {
         udpChannel.writeAndFlush(new DatagramPacket(byteBuf, socketAddress));
     }
 
@@ -107,28 +122,48 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
         }
     }
 
+    /**
+     * Create a new WebSocket connection.
+     * @throws SSLException if the SSL context cannot be created
+     */
     private void newWebSocketConnection() throws SSLException {
+        // If existing WebSocket channel exists, close it.
         if (wsChannel != null) {
             wsChannel.close();
         }
 
         webSocketClientFuture = new WebSocketClient().start(eventLoopGroup, this);
+
+        // Wait for the WebSocket connection to be established before sending queued frames.
         webSocketClientFuture.addListener((ChannelFutureListener) future -> {
+
+            // If the future is successful, set the WebSocket channel and WebSocket client handler.
+            // If the future is not successful, log the error and exit the JVM.
             if (future.isSuccess()) {
                 wsChannel = future.channel();
                 webSocketClientHandler = wsChannel.pipeline().get(WebSocketClientHandler.class);
 
+                // Wait for the WebSocket connection to finish authentication before sending queued frames.
                 webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) handshakeFuture -> {
+
+                    // If the authentication future is successful, send the queued frames.
+                    // If the authentication future is not successful, log the error and exit the JVM.
                     if (handshakeFuture.isSuccess()) {
                         // Send queued frames
                         while (!queuedFrames.isEmpty()) {
                             wsChannel.writeAndFlush(queuedFrames.poll());
                         }
 
-                        // Retry next connection when the current connection closes
+                        // Retry the WebSocket connection if it is closed unexpectedly.
                         wsChannel.closeFuture().addListener(closeFuture -> newWebSocketConnection());
+                    } else {
+                        log.error("Failed to authenticate WebSocket connection", handshakeFuture.cause());
+                        System.exit(1);
                     }
                 });
+            } else {
+                log.error("Failed to connect to WebSocket server", future.cause());
+                System.exit(1);
             }
         });
     }

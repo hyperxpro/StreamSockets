@@ -60,6 +60,7 @@ final class WebSocketClient {
                 .group(eventLoopGroup)
                 .channelFactory(channelFactory())
                 .option(ChannelOption.TCP_NODELAY, true)
+                .option(ChannelOption.SO_KEEPALIVE, true)
                 .handler(new WebSocketClientInitializer(datagramHandler, uri, sslContext));
 
         log.info("Connecting to WebSocketServer at {}:{}", uri.getHost(), uri.getPort());

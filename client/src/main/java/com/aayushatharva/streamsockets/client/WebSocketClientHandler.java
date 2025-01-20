@@ -17,6 +17,7 @@
 
 package com.aayushatharva.streamsockets.client;
 
+import com.aayushatharva.streamsockets.common.Utils;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import io.netty.buffer.ByteBuf;
@@ -36,7 +37,9 @@ import lombok.extern.log4j.Log4j2;
 import java.util.concurrent.ScheduledFuture;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
+import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 import static io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
@@ -60,13 +63,14 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) {
+        this.ctx = ctx;
         websocketHandshakeFuture = ctx.newPromise();
         authenticationFuture = ctx.newPromise();
-        this.ctx = ctx;
     }
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        // If the handshake is complete, create a new UDP connection on server end and set the handshake future to success
         if (evt instanceof ClientHandshakeStateEvent event && event == HANDSHAKE_COMPLETE) {
             newUdpConnection();
             websocketHandshakeFuture.setSuccess();
@@ -79,7 +83,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof TextWebSocketFrame textWebSocketFrame) {
             JsonObject requestJson = JsonParser.parseString(textWebSocketFrame.text()).getAsJsonObject();
-            // Check if the connection was successful
+
+            // If the server sends a success message, set the authentication future to success
             if (requestJson.get("success").getAsBoolean() && requestJson.get("message").getAsString().equalsIgnoreCase("connected")) {
                 log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
                 authenticationFuture.setSuccess();
@@ -87,7 +92,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 // Send a ping every 5 seconds
                 pingFuture = ctx.channel().eventLoop().schedule(() -> {
                     ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate()));
-                }, 5, SECONDS);
+                }, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
 
                 // Stop the ping when the channel is closed
                 ctx.channel().closeFuture().addListener(future -> {
@@ -101,7 +106,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 System.exit(1);
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            datagramHandler.writeToClient(binaryWebSocketFrame.content());
+            datagramHandler.writeToUdpClient(binaryWebSocketFrame.content());
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
