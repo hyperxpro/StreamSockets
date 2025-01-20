@@ -63,8 +63,8 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
             if (socketAddress == null) {
                 socketAddress = packet.sender();
                 udpChannel = ctx.channel();
-            } else if (!socketAddress.equals(packet.sender())) {
-                webSocketClientHandler.newUdpConnection(ctx);
+            } else if (!isInetSocketAddressEquals(socketAddress, packet.sender())) {
+                webSocketClientHandler.newUdpConnection();
                 socketAddress = packet.sender();
 
                 webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) future -> {
@@ -135,5 +135,9 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
     public ChannelFuture webSocketClientFuture() {
         return webSocketClientFuture;
+    }
+
+    private static boolean isInetSocketAddressEquals(InetSocketAddress socketAddress1, InetSocketAddress socketAddress2) {
+        return socketAddress1.getAddress().equals(socketAddress2.getAddress()) && socketAddress1.getPort() == socketAddress2.getPort();
     }
 }
