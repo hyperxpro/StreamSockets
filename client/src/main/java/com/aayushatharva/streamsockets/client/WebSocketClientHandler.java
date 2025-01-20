@@ -19,19 +19,25 @@ package com.aayushatharva.streamsockets.client;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
 
+import java.util.concurrent.ScheduledFuture;
+
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * This class receives {@link WebSocketFrame} from the WebSocket server and sends them to the UDP client.
@@ -39,11 +45,14 @@ import static io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHand
 @Log4j2
 public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
+    private static final ByteBuf PING = Unpooled.wrappedBuffer("PING".getBytes());
     private final DatagramHandler datagramHandler;
 
     private ChannelPromise websocketHandshakeFuture;
     private ChannelPromise authenticationFuture;
     private ChannelHandlerContext ctx;
+
+    private ScheduledFuture<?> pingFuture;
 
     WebSocketClientHandler(DatagramHandler datagramHandler) {
         this.datagramHandler = datagramHandler;
@@ -74,6 +83,18 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             if (requestJson.get("success").getAsBoolean() && requestJson.get("message").getAsString().equalsIgnoreCase("connected")) {
                 log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
                 authenticationFuture.setSuccess();
+
+                // Send a ping every 5 seconds
+                pingFuture = ctx.channel().eventLoop().schedule(() -> {
+                    ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate()));
+                }, 5, SECONDS);
+
+                // Stop the ping when the channel is closed
+                ctx.channel().closeFuture().addListener(future -> {
+                    if (pingFuture != null) {
+                        pingFuture.cancel(true);
+                    }
+                });
             } else {
                 log.error("Failed to connect to remote server: {}", requestJson.get("message").getAsString());
                 authenticationFuture.setFailure(new Exception(requestJson.get("message").getAsString()));
