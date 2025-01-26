@@ -92,9 +92,9 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 authenticationFuture.setSuccess();
 
                 // Send a ping every 5 seconds
-                pingFuture = ctx.channel().eventLoop().schedule(() -> {
+                pingFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                     ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate()));
-                }, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
+                },0, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
 
                 lastPongTime = System.currentTimeMillis();
                 pongTimeoutFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
