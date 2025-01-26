@@ -89,7 +89,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
                 // Send a ping every 5 seconds
                 ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                    ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate())).addListener(System.out::println);
+                    ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate()));
                 }, 0, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
 
                 lastPongTime = System.currentTimeMillis();
@@ -100,12 +100,6 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                         System.exit(1);
                     }
                 }, 0, 1000, MILLISECONDS);
-
-                // Stop the ping when the channel is closed
-                ctx.channel().closeFuture().addListener(future -> {
-                    log.info("Disconnected from remote server: {}", ctx.channel().remoteAddress());
-                    System.exit(1);
-                });
             } else {
                 log.error("Failed to connect to remote server: {}", requestJson.get("message").getAsString());
                 authenticationFuture.setFailure(new Exception(requestJson.get("message").getAsString()));
