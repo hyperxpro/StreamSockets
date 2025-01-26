@@ -140,6 +140,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
         if (!websocketHandshakeFuture.isDone()) {
             websocketHandshakeFuture.setFailure(cause);
         }
+
+        System.exit(1);
     }
 
     void newUdpConnection() {
