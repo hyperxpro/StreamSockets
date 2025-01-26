@@ -98,6 +98,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
                 lastPongTime = System.currentTimeMillis();
                 pongTimeoutFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                    System.out.println("Pong timeout: " + (System.currentTimeMillis() - lastPongTime));
                     if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
                         log.error("Ping timeout, exiting...");
                         ctx.close();
