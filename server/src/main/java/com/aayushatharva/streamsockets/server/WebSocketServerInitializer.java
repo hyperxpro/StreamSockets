@@ -22,6 +22,8 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.codec.http.websocketx.WebSocketDecoderConfig;
+import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolConfig;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
@@ -37,10 +39,23 @@ final class WebSocketServerInitializer extends ChannelInitializer<SocketChannel>
 
     @Override
     protected void initChannel(SocketChannel channel) {
+        WebSocketServerProtocolConfig config = WebSocketServerProtocolConfig.newBuilder()
+                .websocketPath(envValue("WS_PATH", "/tunnel"))
+                .subprotocols(null)
+                .checkStartsWith(false)
+                .handshakeTimeoutMillis(10000L)
+                .dropPongFrames(false)
+                .decoderConfig(WebSocketDecoderConfig.newBuilder()
+                        .maxFramePayloadLength(65536)
+                        .allowMaskMismatch(false)
+                        .allowExtensions(false)
+                        .build())
+                .build();
+
         channel.pipeline().addLast(new HttpServerCodec());
         channel.pipeline().addLast(new HttpObjectAggregator(envValueAsInt("HTTP_MAX_CONTENT_LENGTH", 65536)));
         channel.pipeline().addLast(new AuthenticationHandler(tokenAuthentication));
-        channel.pipeline().addLast(new WebSocketServerProtocolHandler(envValue("WS_PATH", "/tunnel")));
+        channel.pipeline().addLast(new WebSocketServerProtocolHandler(config));
         channel.pipeline().addLast(new WebSocketServerHandler(tokenAuthentication));
     }
 }
