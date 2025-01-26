@@ -67,6 +67,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
             udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content(), socketAddress));
         } else if (msg instanceof PingWebSocketFrame pingWebSocketFrame) {
+            System.out.println("PingWebSocketFrame");
             ctx.writeAndFlush(new PongWebSocketFrame(pingWebSocketFrame.content()));
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
