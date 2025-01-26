@@ -93,13 +93,11 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
                 // Send a ping every 5 seconds
                 pingFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                    System.out.println("Sending ping");
                     ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate())).addListener(System.out::println);
                 },0, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
 
                 lastPongTime = System.currentTimeMillis();
                 pongTimeoutFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                    System.out.println("Pong timeout: " + (System.currentTimeMillis() - lastPongTime));
                     if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
                         log.error("Ping timeout, exiting...");
                         ctx.close();
@@ -122,7 +120,6 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
         } else if (msg instanceof PongWebSocketFrame pongWebSocketFrame) {
             pongWebSocketFrame.content().release();
             lastPongTime = System.currentTimeMillis();
-            System.out.println("Pong received");
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
