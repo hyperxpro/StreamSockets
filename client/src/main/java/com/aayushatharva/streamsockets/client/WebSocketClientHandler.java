@@ -34,6 +34,8 @@ import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
@@ -48,6 +50,8 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     private static final ByteBuf PING = Unpooled.wrappedBuffer("PING".getBytes());
+    private static final ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
+    private static final int PING_TIMEOUT_MILLIS = envValueAsInt("PING_TIMEOUT_MILLIS", 10_000);
     private final DatagramHandler datagramHandler;
 
     private ChannelPromise websocketHandshakeFuture;
@@ -55,6 +59,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     private ChannelHandlerContext ctx;
 
     private ScheduledFuture<?> pingFuture;
+    private ScheduledFuture<?> pongTimeoutFuture;
+    private long lastPongTime;
 
     WebSocketClientHandler(DatagramHandler datagramHandler) {
         this.datagramHandler = datagramHandler;
@@ -93,10 +99,23 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                     ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate()));
                 }, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
 
+                lastPongTime = System.currentTimeMillis();
+                pongTimeoutFuture = executorService.scheduleAtFixedRate(() -> {
+                    if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
+                        log.error("Ping timeout, exiting...");
+                        ctx.close();
+                        System.exit(1);
+                    }
+                }, 0, 1000, MILLISECONDS);
+
                 // Stop the ping when the channel is closed
                 ctx.channel().closeFuture().addListener(future -> {
                     if (pingFuture != null) {
                         pingFuture.cancel(true);
+                    }
+
+                    if (pongTimeoutFuture != null) {
+                        pongTimeoutFuture.cancel(true);
                     }
                 });
             } else {
@@ -108,6 +127,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             datagramHandler.writeToUdpClient(binaryWebSocketFrame.content());
         } else if (msg instanceof PongWebSocketFrame pongWebSocketFrame) {
             pongWebSocketFrame.content().release();
+            lastPongTime = System.currentTimeMillis();
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
