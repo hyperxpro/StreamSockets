@@ -69,7 +69,7 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
 
         channel.pipeline().addLast(new HttpClientCodec());
         channel.pipeline().addLast(new HttpObjectAggregator(8192));
-        channel.pipeline().addLast(new WebSocketClientProtocolHandler(handshaker));
+        channel.pipeline().addLast(new WebSocketClientProtocolHandler(handshaker, true, false));
         channel.pipeline().addLast(new WebSocketClientHandler(datagramHandler));
     }
 }

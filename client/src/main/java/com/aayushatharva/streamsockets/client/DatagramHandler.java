@@ -175,4 +175,11 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     private static boolean isInetSocketAddressEquals(InetSocketAddress socketAddress1, InetSocketAddress socketAddress2) {
         return socketAddress1.getAddress().equals(socketAddress2.getAddress()) && socketAddress1.getPort() == socketAddress2.getPort();
     }
+
+    public ChannelFuture close() {
+        if (udpChannel != null) {
+            return udpChannel.close();
+        }
+        return null;
+    }
 }
