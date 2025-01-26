@@ -42,6 +42,7 @@ services:
       - AUTH_TOKEN=secret
       - ROUTE=127.0.0.1:8888
       - PING_INTERVAL_MILLIS=1000
+      - PING_TIMEOUT_MILLIS=10000
     ports:
       - "8888:8888/udp"
 ```
@@ -64,6 +65,7 @@ services:
 - `AUTH_TOKEN` - Authentication token.
 - `ROUTE` - Route to the endpoint.
 - `PING_INTERVAL_MILLIS` - Interval in milliseconds to send ping messages to the server.
+- `PING_TIMEOUT_MILLIS` - Timeout in milliseconds to wait for a pong message from the server before closing the connection.
 
 ### Accounts Configuration
 

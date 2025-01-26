@@ -48,7 +48,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
 
     private final TokenAuthentication tokenAuthentication;
     private InetSocketAddress socketAddress;
-    private Channel channel;
+    private Channel udpChannel;
 
     WebSocketServerHandler(TokenAuthentication tokenAuthentication) {
         this.tokenAuthentication = tokenAuthentication;
@@ -57,17 +57,15 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof TextWebSocketFrame textWebSocketFrame) {
-            // Close existing connection if any and create a new connectiona
+            // Close existing connection if any and create a new connection
             // This is done to prevent multiple connections to the same remote server
             if (socketAddress != null) {
-                channel.close().addListener((ChannelFutureListener) future -> {
-                    newConnection(textWebSocketFrame, ctx);
-                });
+                udpChannel.close().addListener((ChannelFutureListener) future -> newConnection(textWebSocketFrame, ctx));
             } else {
                 newConnection(textWebSocketFrame, ctx);
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            channel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content(), socketAddress));
+            udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content(), socketAddress));
         } else if (msg instanceof PingWebSocketFrame pingWebSocketFrame) {
             ctx.writeAndFlush(new PongWebSocketFrame(pingWebSocketFrame.content()));
         } else {
@@ -115,7 +113,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
             if (future.isSuccess()) {
                 log.info("{} connected to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
 
-                channel = future.channel();
+                udpChannel = future.channel();
                 responseJson.addProperty("success", true);
                 responseJson.addProperty("message", "connected");
                 ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString()));
@@ -123,7 +121,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 // If the WebSocket connection is closed, close the UDP channel
                 ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
                     log.info("{} disconnected from remote server: {}", ctx.channel().remoteAddress(), socketAddress);
-                    channel.close();
+                    udpChannel.close();
                 });
             } else {
                 log.error("{} failed to connect to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
