@@ -110,14 +110,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 // Stop the ping when the channel is closed
                 ctx.channel().closeFuture().addListener(future -> {
                     log.info("Disconnected from remote server: {}", ctx.channel().remoteAddress());
-
-                    if (pingFuture != null) {
-                        pingFuture.cancel(true);
-                    }
-
-                    if (pongTimeoutFuture != null) {
-                        pongTimeoutFuture.cancel(true);
-                    }
+                    System.exit(1);
                 });
             } else {
                 log.error("Failed to connect to remote server: {}", requestJson.get("message").getAsString());
