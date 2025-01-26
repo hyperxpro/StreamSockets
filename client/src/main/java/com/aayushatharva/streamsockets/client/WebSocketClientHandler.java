@@ -126,6 +126,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
         } else if (msg instanceof PongWebSocketFrame pongWebSocketFrame) {
             pongWebSocketFrame.content().release();
             lastPongTime = System.currentTimeMillis();
+            System.out.println("Pong received");
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
