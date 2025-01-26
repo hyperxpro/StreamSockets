@@ -98,4 +98,4 @@ accounts:
 - `allowedIps` - List of allowed IP addresses or CIDR ranges for client.
 - `reuse` - Whether to allow reuse of the account concurrently.
 - `routes` - List of routes for the client.
-- `token` - Authentication token for the client.
+- `token` - Authentication token for the client. (`openssl rand -hex 32`)
