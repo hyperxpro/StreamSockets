@@ -34,8 +34,6 @@ import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
 
-import java.util.concurrent.ScheduledFuture;
-
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 import static io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE;
@@ -55,8 +53,6 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     private ChannelPromise authenticationFuture;
     private ChannelHandlerContext ctx;
 
-    private ScheduledFuture<?> pingFuture;
-    private ScheduledFuture<?> pongTimeoutFuture;
     private long lastPongTime;
 
     WebSocketClientHandler(DatagramHandler datagramHandler) {
@@ -92,12 +88,12 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 authenticationFuture.setSuccess();
 
                 // Send a ping every 5 seconds
-                pingFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                     ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate())).addListener(System.out::println);
-                },0, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
+                }, 0, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
 
                 lastPongTime = System.currentTimeMillis();
-                pongTimeoutFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                     if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
                         log.error("Ping timeout, exiting...");
                         ctx.close();
