@@ -36,9 +36,16 @@ final class DownstreamHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof DatagramPacket packet) {
-            channel.writeAndFlush(new BinaryWebSocketFrame(packet.content()));
+            // Retain content since it will be used by BinaryWebSocketFrame
+            channel.writeAndFlush(new BinaryWebSocketFrame(packet.content().retain()));
+            packet.release();
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
+            
+            // Release the message if it is a reference counted object
+            if (msg instanceof io.netty.util.ReferenceCounted referenceCounted) {
+                referenceCounted.release();
+            }
         }
     }
 

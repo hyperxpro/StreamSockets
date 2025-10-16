@@ -84,6 +84,9 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                     }
                 });
 
+                // Store route in channel attribute for WebSocketServerHandler to use
+                ctx.channel().attr(WebSocketServerHandler.ROUTE_ATTR).set(route);
+
                 ctx.pipeline().remove(this);
                 ctx.fireChannelRead(msg);
             } else {

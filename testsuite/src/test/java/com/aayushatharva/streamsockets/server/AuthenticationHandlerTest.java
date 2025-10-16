@@ -78,10 +78,10 @@ public class AuthenticationHandlerTest {
     void connectToServerAndAuthSuccess() throws InterruptedException {
         WebSocketClientHandler webSocketClientHandler = udpServer.datagramHandler().webSocketClientFuture().sync().channel().pipeline().get(WebSocketClientHandler.class);
 
-        boolean handshakeSuccess = webSocketClientHandler.websocketHandshakeFuture().awaitUninterruptibly().isSuccess();
+        boolean handshakeSuccess = webSocketClientHandler.handshakeFuture().awaitUninterruptibly().isSuccess();
         assertTrue(handshakeSuccess);
 
-        webSocketClientHandler.authenticationFuture().sync();
-        assertTrue(webSocketClientHandler.authenticationFuture().isSuccess());
+        // With the new approach, handshake completion means authentication is done
+        assertTrue(webSocketClientHandler.handshakeFuture().isSuccess());
     }
 }
