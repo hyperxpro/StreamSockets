@@ -18,11 +18,13 @@
 package com.aayushatharva.streamsockets.client;
 
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.SocketChannel;
@@ -61,6 +63,10 @@ final class WebSocketClient {
                 .channelFactory(channelFactory())
                 .option(ChannelOption.TCP_NODELAY, true)
                 .option(ChannelOption.SO_KEEPALIVE, true)
+                // Use pooled direct buffers for zero-copy I/O performance
+                .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                // Conservative water marks for proxy: high watermark at 1MB to protect against slow upstream
+                .option(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(512 * 1024, 1024 * 1024))
                 .handler(new WebSocketClientInitializer(datagramHandler, uri, sslContext));
 
         log.info("Connecting to WebSocketServer at {}:{}", uri.getHost(), uri.getPort());

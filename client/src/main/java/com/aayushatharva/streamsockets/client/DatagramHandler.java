@@ -32,8 +32,10 @@ import lombok.extern.log4j.Log4j2;
 
 import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
+import java.util.ArrayDeque;
 import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * This class receives {@link DatagramPacket} from the UDP client and sends them to the WebSocket server.
@@ -42,14 +44,20 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 @ChannelHandler.Sharable
 public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
-    private final Queue<BinaryWebSocketFrame> queuedFrames = new ConcurrentLinkedQueue<>();
+    private static final int MAX_RECONNECT_ATTEMPTS = 5;
+    private static final int INITIAL_RECONNECT_DELAY_MS = 1000;
+    
+    // ArrayDeque is faster than ConcurrentLinkedQueue since we access it only from event loop thread
+    private final Queue<BinaryWebSocketFrame> queuedFrames = new ArrayDeque<>();
     private final EventLoopGroup eventLoopGroup;
+    private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
 
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
     private Channel wsChannel;
     private ChannelFuture webSocketClientFuture;
     private WebSocketClientHandler webSocketClientHandler;
+    private volatile boolean shutdown = false;
 
     DatagramHandler(EventLoopGroup eventLoopGroup) throws SSLException {
         this.eventLoopGroup = eventLoopGroup;
@@ -70,30 +78,24 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 socketAddress = packet.sender();
                 
                 // Reconnect to get a new route/connection
-                try {
-                    newWebSocketConnection();
-                } catch (SSLException e) {
-                    log.error("Failed to create new WebSocket connection", e);
-                    System.exit(1);
-                }
+                reconnectWebSocket();
 
                 // Wait for the WebSocket connection to finish handshake before sending queued frames.
-                webSocketClientHandler.handshakeFuture().addListener((ChannelFutureListener) future -> {
+                if (webSocketClientHandler != null) {
+                    webSocketClientHandler.handshakeFuture().addListener((ChannelFutureListener) future -> {
+                        if (future.isSuccess()) {
+                            log.debug("WebSocket connection established successfully, sending queued frames");
 
-                    // If the future is successful, send the queued frames.
-                    // if the future is not successful, log the error and exit the JVM.
-                    if (future.isSuccess()) {
-                        log.debug("WebSocket connection established successfully, sending queued frames");
-
-                        // Send queued frames
-                        while (!queuedFrames.isEmpty()) {
-                            wsChannel.writeAndFlush(queuedFrames.poll());
+                            // Send queued frames
+                            while (!queuedFrames.isEmpty()) {
+                                wsChannel.writeAndFlush(queuedFrames.poll());
+                            }
+                        } else {
+                            log.error("Failed to establish WebSocket connection", future.cause());
+                            // Queue will be processed when connection is re-established
                         }
-                    } else {
-                        log.error("Failed to establish WebSocket connection", future.cause());
-                        System.exit(1);
-                    }
-                });
+                    });
+                }
             }
 
             BinaryWebSocketFrame binaryWebSocketFrame = new BinaryWebSocketFrame(packet.content().retain());
@@ -125,9 +127,49 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
+        shutdown = true;
+        releaseQueuedFrames();
         if (webSocketClientFuture != null) {
             webSocketClientFuture.channel().close();
         }
+    }
+
+    /**
+     * Release all queued frames to prevent memory leak
+     */
+    private void releaseQueuedFrames() {
+        BinaryWebSocketFrame frame;
+        while ((frame = queuedFrames.poll()) != null) {
+            frame.release();
+        }
+    }
+
+    /**
+     * Reconnect WebSocket with exponential backoff
+     */
+    private void reconnectWebSocket() {
+        if (shutdown) {
+            return;
+        }
+
+        int attempts = reconnectAttempts.incrementAndGet();
+        if (attempts > MAX_RECONNECT_ATTEMPTS) {
+            log.error("Max reconnection attempts ({}) reached, giving up", MAX_RECONNECT_ATTEMPTS);
+            reconnectAttempts.set(0); // Reset for next time
+            return;
+        }
+
+        int delay = INITIAL_RECONNECT_DELAY_MS * (1 << (attempts - 1)); // Exponential backoff
+        log.info("Scheduling WebSocket reconnection attempt {} in {}ms", attempts, delay);
+
+        eventLoopGroup.schedule(() -> {
+            try {
+                newWebSocketConnection();
+            } catch (SSLException e) {
+                log.error("Failed to reconnect WebSocket, attempt {}/{}", attempts, MAX_RECONNECT_ATTEMPTS, e);
+                // Will retry on next packet or connection close
+            }
+        }, delay, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -135,6 +177,10 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
      * @throws SSLException if the SSL context cannot be created
      */
     private void newWebSocketConnection() throws SSLException {
+        if (shutdown) {
+            return;
+        }
+
         // If existing WebSocket channel exists, close it.
         if (wsChannel != null) {
             wsChannel.close();
@@ -146,7 +192,6 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
         webSocketClientFuture.addListener((ChannelFutureListener) future -> {
 
             // If the future is successful, set the WebSocket channel and WebSocket client handler.
-            // If the future is not successful, log the error and exit the JVM.
             if (future.isSuccess()) {
                 wsChannel = future.channel();
                 webSocketClientHandler = wsChannel.pipeline().get(WebSocketClientHandler.class);
@@ -154,9 +199,10 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 // Wait for the WebSocket handshake to complete before sending queued frames.
                 webSocketClientHandler.handshakeFuture().addListener((ChannelFutureListener) handshakeFuture -> {
 
-                    // If the handshake future is successful, send the queued frames.
-                    // If the handshake future is not successful, log the error and exit the JVM.
                     if (handshakeFuture.isSuccess()) {
+                        // Reset reconnect attempts on successful connection
+                        reconnectAttempts.set(0);
+                        
                         // Send queued frames
                         while (!queuedFrames.isEmpty()) {
                             wsChannel.writeAndFlush(queuedFrames.poll());
@@ -164,21 +210,19 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
                         // Retry the WebSocket connection if it is closed unexpectedly.
                         wsChannel.closeFuture().addListener(closeFuture -> {
-                            try {
-                                newWebSocketConnection();
-                            } catch (SSLException e) {
-                                log.error("Failed to reconnect WebSocket", e);
-                                System.exit(1);
+                            if (!shutdown) {
+                                log.warn("WebSocket connection closed unexpectedly, will reconnect");
+                                reconnectWebSocket();
                             }
                         });
                     } else {
                         log.error("Failed to complete WebSocket handshake", handshakeFuture.cause());
-                        System.exit(1);
+                        reconnectWebSocket();
                     }
                 });
             } else {
                 log.error("Failed to connect to WebSocket server", future.cause());
-                System.exit(1);
+                reconnectWebSocket();
             }
         });
     }
