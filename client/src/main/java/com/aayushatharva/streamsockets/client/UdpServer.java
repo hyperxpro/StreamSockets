@@ -18,9 +18,11 @@
 package com.aayushatharva.streamsockets.client;
 
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollDatagramChannel;
@@ -56,6 +58,7 @@ public final class UdpServer {
         Bootstrap bootstrap = new Bootstrap()
                 .group(eventLoopGroup)
                 .channelFactory(channelFactory())
+                .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 .handler(datagramHandler);
 
         AtomicBoolean reusePort = new AtomicBoolean(false);

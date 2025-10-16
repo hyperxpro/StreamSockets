@@ -101,8 +101,13 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            // Retain the content since it will be used by DatagramPacket
-            udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
+            // Check if UDP channel is writable before sending to prevent buffer bloat
+            if (udpChannel != null && udpChannel.isWritable()) {
+                // Retain the content since it will be used by DatagramPacket
+                udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
+            } else {
+                log.warn("UDP channel not writable, dropping packet");
+            }
             binaryWebSocketFrame.release();
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());

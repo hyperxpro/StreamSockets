@@ -36,8 +36,13 @@ final class DownstreamHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof DatagramPacket packet) {
-            // Retain content since it will be used by BinaryWebSocketFrame
-            channel.writeAndFlush(new BinaryWebSocketFrame(packet.content().retain()));
+            // Check if WebSocket channel is writable before sending to prevent buffer bloat
+            if (channel.isWritable()) {
+                // Retain content since it will be used by BinaryWebSocketFrame
+                channel.writeAndFlush(new BinaryWebSocketFrame(packet.content().retain()));
+            } else {
+                log.warn("WebSocket channel not writable, dropping packet");
+            }
             packet.release();
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());

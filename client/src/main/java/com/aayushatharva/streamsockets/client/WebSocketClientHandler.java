@@ -28,6 +28,7 @@ import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent;
 import io.netty.util.ReferenceCounted;
+import io.netty.util.concurrent.ScheduledFuture;
 import lombok.extern.log4j.Log4j2;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
@@ -40,7 +41,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 @Log4j2
 public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
-    private static final ByteBuf PING = Unpooled.wrappedBuffer("PING".getBytes());
+    private static final ByteBuf PING = Unpooled.unreleasableBuffer(Unpooled.directBuffer(4).writeBytes("PING".getBytes()));
     private static final int PING_TIMEOUT_MILLIS = envValueAsInt("PING_TIMEOUT_MILLIS", 10_000);
     private static final int PING_INTERVAL_MILLIS = envValueAsInt("PING_INTERVAL_MILLIS", 1_000);
     
@@ -50,6 +51,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     private ChannelHandlerContext ctx;
 
     private long lastPongTime;
+    private ScheduledFuture<?> pingScheduledFuture;
+    private ScheduledFuture<?> timeoutScheduledFuture;
 
     WebSocketClientHandler(DatagramHandler datagramHandler) {
         this.datagramHandler = datagramHandler;
@@ -69,18 +72,20 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             handshakeFuture.setSuccess();
             
             // Send a ping periodically
-            ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate()));
+            pingScheduledFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                if (ctx.channel().isActive()) {
+                    ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate()));
+                }
             }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
 
-            // Monitor ping timeout
+            // Monitor ping timeout - use single scheduled task
             lastPongTime = System.currentTimeMillis();
-            ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
+            timeoutScheduledFuture = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                if (ctx.channel().isActive() && System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
                     log.error("Ping timeout, closing connection...");
                     ctx.close();
                 }
-            }, 0, 1000, MILLISECONDS);
+            }, PING_TIMEOUT_MILLIS, PING_TIMEOUT_MILLIS, MILLISECONDS);
             
             return;
         }
@@ -104,6 +109,21 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 referenceCounted.release();
             }
         }
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        log.warn("WebSocket channel became inactive: {}", ctx.channel().remoteAddress());
+        
+        // Cancel scheduled tasks
+        if (pingScheduledFuture != null) {
+            pingScheduledFuture.cancel(false);
+        }
+        if (timeoutScheduledFuture != null) {
+            timeoutScheduledFuture.cancel(false);
+        }
+        
+        super.channelInactive(ctx);
     }
 
     @Override

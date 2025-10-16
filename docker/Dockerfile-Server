@@ -1,23 +1,32 @@
 # Stage 1: Build the project
 FROM maven:3.9.9-amazoncorretto-21 AS build
 
-# Set the working directory
+# Build stage
 WORKDIR /app
-
-# Copy the source code
 COPY . .
-
-# Build the project
 RUN mvn -ntp -B clean package -DskipTests
 
-# Stage 2: Create the final image
-FROM amazoncorretto:21-al2023-headless
+# Final runtime image (smaller runtime base)
+FROM amazoncorretto:21-al2023
 
-# Set the working directory
+# Create a non-root user and group
+RUN groupadd -r app && useradd -r -g app -m -s /bin/false app || true
+
 WORKDIR /app
+COPY --from=build /app/server/target/server-*.jar /app/server.jar
 
-# Copy the JAR files from the build stage
-COPY --from=build /app/server/server.jar /app/server.jar
+# Default JVM options (tune via JAVA_OPTS at runtime)
+# Using ZGC for ultra-low latency and pause times on Java 21
+ENV JAVA_OPTS="-XX:+UseZGC -XX:ZCollectionInterval=5 \
+  -XX:InitialRAMPercentage=20.0 -XX:MaxRAMPercentage=75.0 -XX:MaxDirectMemorySize=1g \
+  -Dio.netty.allocator.numDirectArenas=8 -Dio.netty.leakDetection.level=SIMPLE"
 
-# Command to run the server JAR file
-CMD ["java", "-jar", "/app/server.jar"]
+# Use unprivileged user
+USER app
+
+# Reduce image attack surface: no shell as login; use exec form below
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+	CMD curl -f http://127.0.0.1:8080/ || exit 1 || true
+
+# Entrypoint: respect JAVA_OPTS and replace the process (no extra shell)
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/server.jar"]

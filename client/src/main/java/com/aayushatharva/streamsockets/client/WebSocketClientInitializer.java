@@ -22,7 +22,6 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpHeaders;
-import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshaker;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakerFactory;
 import io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler;
@@ -68,7 +67,7 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
         WebSocketClientHandshaker handshaker = WebSocketClientHandshakerFactory.newHandshaker(uri, V13, null, false, headers);
 
         channel.pipeline().addLast(new HttpClientCodec());
-        channel.pipeline().addLast(new HttpObjectAggregator(8192));
+        // HttpObjectAggregator removed for lower latency - WebSocket handshake works without it
         channel.pipeline().addLast(new WebSocketClientProtocolHandler(handshaker, true, false));
         channel.pipeline().addLast(new WebSocketClientHandler(datagramHandler));
     }

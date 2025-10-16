@@ -103,7 +103,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
             // If the WebSocket channel is active and ready for write, send the frame directly.
             // Else add the frame to the queue.
-            if (wsChannel != null && wsChannel.isActive() && webSocketClientHandler.isReadyForWrite()) {
+            if (wsChannel != null && wsChannel.isActive() && wsChannel.isWritable() && webSocketClientHandler.isReadyForWrite()) {
                 wsChannel.writeAndFlush(binaryWebSocketFrame);
             } else {
                 queuedFrames.add(binaryWebSocketFrame);
@@ -122,7 +122,13 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
      * Write and flush a {@link DatagramPacket} to the UDP client.
      */
     void writeToUdpClient(ByteBuf byteBuf) {
-        udpChannel.writeAndFlush(new DatagramPacket(byteBuf, socketAddress));
+        if (udpChannel != null && udpChannel.isWritable()) {
+            udpChannel.writeAndFlush(new DatagramPacket(byteBuf, socketAddress));
+        } else {
+            // If channel is not writable, drop the packet to prevent memory buildup
+            log.warn("UDP channel not writable, dropping packet");
+            byteBuf.release();
+        }
     }
 
     @Override

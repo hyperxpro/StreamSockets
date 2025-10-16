@@ -13,11 +13,20 @@ RUN mvn -ntp -B clean package -DskipTests
 # Stage 2: Create the final image
 FROM amazoncorretto:21-al2023-headless
 
-# Set the working directory
+# Create a non-root user for safety
+RUN useradd --create-home --shell /bin/bash appuser || true
+
 WORKDIR /app
+COPY --from=build /app/client/target/client-*.jar /app/client.jar
 
-# Copy the JAR files from the build stage
-COPY --from=build /app/client/client.jar /app/client.jar
+# Default JVM options (tune via JAVA_OPTS at runtime)
+# Using ZGC for ultra-low latency and pause times on Java 21
+ENV JAVA_OPTS="-XX:+UseZGC -XX:ZCollectionInterval=5 \
+  -XX:InitialRAMPercentage=20.0 -XX:MaxRAMPercentage=75.0 -XX:MaxDirectMemorySize=1g \
+  -Dio.netty.allocator.numDirectArenas=8 -Dio.netty.leakDetection.level=SIMPLE"
 
-# Command to run the server JAR file
-CMD ["java", "-jar", "/app/client.jar"]
+# Run as non-root
+USER appuser
+
+# Provide an exec-style default command that respects JAVA_OPTS
+CMD ["sh", "-c", "exec java $JAVA_OPTS -jar /app/client.jar"]
