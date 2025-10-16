@@ -17,6 +17,7 @@
 
 package com.aayushatharva.streamsockets.client;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import io.netty.buffer.ByteBuf;
@@ -45,8 +46,11 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 @Log4j2
 public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
-    private static final ByteBuf PING = Unpooled.wrappedBuffer("PING".getBytes());
+    // Use unreleasableBuffer to prevent accidental releases and reuse Gson for performance
+    private static final ByteBuf PING = Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("PING".getBytes()));
     private static final int PING_TIMEOUT_MILLIS = envValueAsInt("PING_TIMEOUT_MILLIS", 10_000);
+    private static final Gson GSON = new Gson();
+    
     private final DatagramHandler datagramHandler;
 
     private ChannelPromise websocketHandshakeFuture;
@@ -89,7 +93,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
                 // Send a ping every 5 seconds
                 ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                    ctx.writeAndFlush(new PingWebSocketFrame(PING.retainedDuplicate()));
+                    ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
                 }, 0, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
 
                 lastPongTime = System.currentTimeMillis();
@@ -105,8 +109,11 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 authenticationFuture.setFailure(new Exception(requestJson.get("message").getAsString()));
                 System.exit(1);
             }
+            textWebSocketFrame.release();
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            datagramHandler.writeToUdpClient(binaryWebSocketFrame.content());
+            // Retain content before passing to datagram handler
+            datagramHandler.writeToUdpClient(binaryWebSocketFrame.content().retain());
+            binaryWebSocketFrame.release();
         } else if (msg instanceof PongWebSocketFrame pongWebSocketFrame) {
             pongWebSocketFrame.content().release();
             lastPongTime = System.currentTimeMillis();
@@ -118,6 +125,12 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 referenceCounted.release();
             }
         }
+    }
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) {
+        // Flush pending writes for better batching
+        ctx.flush();
     }
 
     @Override
@@ -135,11 +148,16 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
         authenticationFuture = ctx.newPromise();
         String route = envValue("ROUTE", "127.0.0.1:8888");
 
-        JsonObject requestJson = new JsonObject();
-        requestJson.addProperty("address", route.split(":")[0]);
-        requestJson.addProperty("port", Integer.parseInt(route.split(":")[1]));
+        // Avoid splitting the route string twice
+        int colonIndex = route.indexOf(':');
+        String address = route.substring(0, colonIndex);
+        int port = Integer.parseInt(route.substring(colonIndex + 1));
 
-        ctx.writeAndFlush(new TextWebSocketFrame(requestJson.toString()));
+        JsonObject requestJson = new JsonObject();
+        requestJson.addProperty("address", address);
+        requestJson.addProperty("port", port);
+
+        ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(requestJson)));
     }
 
     boolean isReadyForWrite() {

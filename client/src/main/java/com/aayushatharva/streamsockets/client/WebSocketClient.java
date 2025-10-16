@@ -61,6 +61,10 @@ final class WebSocketClient {
                 .channelFactory(channelFactory())
                 .option(ChannelOption.TCP_NODELAY, true)
                 .option(ChannelOption.SO_KEEPALIVE, true)
+                .option(ChannelOption.SO_RCVBUF, 65536)
+                .option(ChannelOption.SO_SNDBUF, 65536)
+                .option(ChannelOption.WRITE_BUFFER_WATER_MARK, new io.netty.channel.WriteBufferWaterMark(32 * 1024, 64 * 1024))
+                .option(ChannelOption.ALLOCATOR, io.netty.buffer.PooledByteBufAllocator.DEFAULT)
                 .handler(new WebSocketClientInitializer(datagramHandler, uri, sslContext));
 
         log.info("Connecting to WebSocketServer at {}:{}", uri.getHost(), uri.getPort());

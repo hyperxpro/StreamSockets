@@ -40,9 +40,14 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
 
     private final TokenAuthentication tokenAuthentication;
-    static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, UNAUTHORIZED, Unpooled.wrappedBuffer("Unauthorized".getBytes()));
-    private static final FullHttpResponse FORBIDDEN_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, FORBIDDEN, Unpooled.wrappedBuffer("Failed to lease account".getBytes()));
-    private static final FullHttpResponse BAD_REQUEST_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, BAD_REQUEST, Unpooled.wrappedBuffer("Invalid authentication type".getBytes()));
+    
+    // Use Unpooled.unreleasableBuffer to prevent accidental releases of shared static content
+    private static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(
+            HTTP_1_1, UNAUTHORIZED, Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("Unauthorized".getBytes())));
+    private static final FullHttpResponse FORBIDDEN_RESPONSE = new DefaultFullHttpResponse(
+            HTTP_1_1, FORBIDDEN, Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("Failed to lease account".getBytes())));
+    private static final FullHttpResponse BAD_REQUEST_RESPONSE = new DefaultFullHttpResponse(
+            HTTP_1_1, BAD_REQUEST, Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("Invalid authentication type".getBytes())));
 
     AuthenticationHandler(TokenAuthentication tokenAuthentication) {
         this.tokenAuthentication = tokenAuthentication;
@@ -67,13 +72,13 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
 
                 // If account is null, return unauthorized
                 if (account == null) {
-                    ctx.writeAndFlush(UNAUTHORIZED_RESPONSE.retainedDuplicate()).addListener(CLOSE);
+                    ctx.writeAndFlush(UNAUTHORIZED_RESPONSE.duplicate()).addListener(CLOSE);
                     return;
                 }
 
                 // If account is not leased, return forbidden
                 if (!tokenAuthentication.leaseAccount(account)) {
-                    ctx.writeAndFlush(FORBIDDEN_RESPONSE.retainedDuplicate()).addListener(CLOSE);
+                    ctx.writeAndFlush(FORBIDDEN_RESPONSE.duplicate()).addListener(CLOSE);
                     return;
                 }
 
@@ -87,7 +92,7 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                 ctx.pipeline().remove(this);
                 ctx.fireChannelRead(msg);
             } else {
-                ctx.writeAndFlush(BAD_REQUEST_RESPONSE.retainedDuplicate()).addListener(CLOSE);
+                ctx.writeAndFlush(BAD_REQUEST_RESPONSE.duplicate()).addListener(CLOSE);
             }
         }
     }

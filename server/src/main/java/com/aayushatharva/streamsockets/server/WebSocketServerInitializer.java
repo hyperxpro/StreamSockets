@@ -46,9 +46,10 @@ final class WebSocketServerInitializer extends ChannelInitializer<SocketChannel>
                 .handshakeTimeoutMillis(10000L)
                 .dropPongFrames(false)
                 .decoderConfig(WebSocketDecoderConfig.newBuilder()
-                        .maxFramePayloadLength(65536)
+                        .maxFramePayloadLength(envValueAsInt("MAX_FRAME_SIZE", 65536))
                         .allowMaskMismatch(false)
                         .allowExtensions(false)
+                        .withUTF8Validator(false) // Performance optimization - skip UTF8 validation for binary frames
                         .build())
                 .build();
 
