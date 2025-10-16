@@ -51,6 +51,28 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- https://mvnrepository.com/artifact/org.yaml/snakeyaml -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>2.5</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.aayushatharva.streamsockets</groupId>
+            <artifactId>common</artifactId>
+            <version>${parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.aayushatharva.streamsockets</groupId>
+            <artifactId>authentication-server</artifactId>
+            <version>${parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+
         <dependency>
             <groupId>com.aayushatharva.streamsockets</groupId>
             <artifactId>server</artifactId>
@@ -72,6 +94,11 @@
                 <version>3.5.3</version>
                 <configuration>
                     <argLine>-Xmx2G</argLine>
+                    <!-- Exclude long-running reconnection tests from default run -->
+                    <excludes>
+                        <exclude>**/WebSocketReconnectionTest.java</exclude>
+                        <exclude>**/ServerConnectionHandlingTest.java</exclude>
+                    </excludes>
                 </configuration>
             </plugin>
         </plugins>

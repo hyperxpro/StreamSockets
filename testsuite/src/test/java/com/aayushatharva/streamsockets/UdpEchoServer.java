@@ -26,11 +26,11 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 
 @Log4j2
-final class UdpEchoServer {
+public final class UdpEchoServer {
 
     private DatagramSocket socket;
 
-    void start() {
+    public void start() {
         new Thread(() -> {
             byte[] buffer = new byte[1024];
 
@@ -70,7 +70,7 @@ final class UdpEchoServer {
         }).start();
     }
 
-    void stop() {
+    public void stop() {
         if (socket != null) {
             socket.close();
         }
