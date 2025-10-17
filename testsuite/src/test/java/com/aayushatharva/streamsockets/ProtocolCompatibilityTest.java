@@ -65,7 +65,8 @@ public class ProtocolCompatibilityTest {
         webSocketServer = new WebSocketServer();
         webSocketServer.start(new TokenAuthentication(accounts));
 
-        // Start UDP server with old protocol (default)
+        // Start UDP server with old protocol (explicitly enabled for testing backwards compatibility)
+        System.setProperty("USE_OLD_PROTOCOL", "true");
         udpServerOld = new UdpServer();
         udpServerOld.start();
     }
@@ -80,6 +81,8 @@ public class ProtocolCompatibilityTest {
         if (udpServerNew != null) {
             udpServerNew.stop();
         }
+        // Clear the property after tests
+        System.clearProperty("USE_OLD_PROTOCOL");
     }
 
     @Test

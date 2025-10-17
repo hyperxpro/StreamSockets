@@ -56,20 +56,20 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
         
         String route = envValue("ROUTE", "127.0.0.1:8888");
         
-        // Check if new protocol should be used (opt-in via environment variable)
-        boolean useNewProtocol = "true".equalsIgnoreCase(envValue("USE_NEW_PROTOCOL", "false"));
+        // Use new protocol by default, allow opt-out via environment variable for backwards compatibility
+        boolean useOldProtocol = "true".equalsIgnoreCase(envValue("USE_OLD_PROTOCOL", "false"));
         
-        if (useNewProtocol) {
-            // New protocol: pass address and port via headers
+        if (useOldProtocol) {
+            // Old protocol: pass route via X-Auth-Route header (for backwards compatibility)
+            headers.add("X-Auth-Route", route);
+        } else {
+            // New protocol (default): pass address and port via headers
             int colonIndex = route.indexOf(':');
             String address = route.substring(0, colonIndex);
             String port = route.substring(colonIndex + 1);
             
             headers.add("X-Route-Address", address);
             headers.add("X-Route-Port", port);
-        } else {
-            // Old protocol: pass route via X-Auth-Route header
-            headers.add("X-Auth-Route", route);
         }
 
         if (sslContext != null) {
@@ -87,6 +87,6 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
         channel.pipeline().addLast(new HttpClientCodec());
         channel.pipeline().addLast(new HttpObjectAggregator(8192));
         channel.pipeline().addLast(new WebSocketClientProtocolHandler(handshaker, true, false));
-        channel.pipeline().addLast(new WebSocketClientHandler(datagramHandler, useNewProtocol));
+        channel.pipeline().addLast(new WebSocketClientHandler(datagramHandler, !useOldProtocol));
     }
 }
