@@ -66,6 +66,8 @@ services:
 - `ROUTE` - Route to the endpoint.
 - `PING_INTERVAL_MILLIS` - Interval in milliseconds to send ping messages to the server.
 - `PING_TIMEOUT_MILLIS` - Timeout in milliseconds to wait for a pong message from the server before closing the connection.
+- `RETRY_INITIAL_DELAY_SECONDS` - Initial delay in seconds before the first retry attempt (default: 1).
+- `RETRY_MAX_DELAY_SECONDS` - Maximum delay in seconds between retry attempts (default: 30).
 
 ### Accounts Configuration
 
