@@ -26,6 +26,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.util.AttributeKey;
 import lombok.extern.log4j.Log4j2;
 
 import java.net.InetSocketAddress;
@@ -40,6 +41,11 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
 
     private final TokenAuthentication tokenAuthentication;
+    
+    // AttributeKeys for storing protocol information
+    private static final AttributeKey<Boolean> NEW_PROTOCOL_KEY = AttributeKey.valueOf("newProtocol");
+    private static final AttributeKey<String> ROUTE_ADDRESS_KEY = AttributeKey.valueOf("routeAddress");
+    private static final AttributeKey<String> ROUTE_PORT_KEY = AttributeKey.valueOf("routePort");
     
     // Use Unpooled.unreleasableBuffer to prevent accidental releases of shared static content
     private static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(
@@ -67,7 +73,18 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                     clientIp = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress().getHostAddress();
                 }
 
-                String route = request.headers().get("X-Auth-Route");
+                // Support both old and new protocol for route information
+                String route;
+                boolean newProtocol = request.headers().contains("X-Route-Address") && request.headers().contains("X-Route-Port");
+                
+                if (newProtocol) {
+                    // New protocol: construct route from address and port headers
+                    route = request.headers().get("X-Route-Address") + ":" + request.headers().get("X-Route-Port");
+                } else {
+                    // Old protocol: use X-Auth-Route header
+                    route = request.headers().get("X-Auth-Route");
+                }
+                
                 Accounts.Account account = tokenAuthentication.authenticate(token, route, clientIp);
 
                 // If account is null, return unauthorized
@@ -88,6 +105,13 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                         log.info("{} disconnected from the server", account.getName());
                     }
                 });
+
+                // Store the protocol version in channel attributes for use by WebSocketServerHandler
+                ctx.channel().attr(NEW_PROTOCOL_KEY).set(newProtocol);
+                if (newProtocol) {
+                    ctx.channel().attr(ROUTE_ADDRESS_KEY).set(request.headers().get("X-Route-Address"));
+                    ctx.channel().attr(ROUTE_PORT_KEY).set(request.headers().get("X-Route-Port"));
+                }
 
                 ctx.pipeline().remove(this);
                 ctx.fireChannelRead(msg);

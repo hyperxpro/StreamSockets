@@ -57,6 +57,6 @@ final class WebSocketServerInitializer extends ChannelInitializer<SocketChannel>
         channel.pipeline().addLast(new HttpObjectAggregator(envValueAsInt("HTTP_MAX_CONTENT_LENGTH", 65536)));
         channel.pipeline().addLast(new AuthenticationHandler(tokenAuthentication));
         channel.pipeline().addLast(new WebSocketServerProtocolHandler(config));
-        channel.pipeline().addLast(new WebSocketServerHandler(tokenAuthentication));
+        channel.pipeline().addLast(new WebSocketServerHandler(tokenAuthentication, false));
     }
 }
