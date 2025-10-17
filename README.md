@@ -64,8 +64,8 @@ services:
 - `WEBSOCKET_URI` - URI of the WebSocket endpoint. 
 - `AUTH_TOKEN` - Authentication token.
 - `ROUTE` - Route to the endpoint.
-- `PING_INTERVAL_MILLIS` - Interval in milliseconds to send ping messages to the server.
-- `PING_TIMEOUT_MILLIS` - Timeout in milliseconds to wait for a pong message from the server before closing the connection.
+- `PING_INTERVAL_MILLIS` - Interval in milliseconds to send ping messages to the server (default: 5000).
+- `PING_TIMEOUT_MILLIS` - Timeout in milliseconds to wait for a pong message from the server. After 5 consecutive failures, the connection is closed and retried (default: 10000).
 - `RETRY_INITIAL_DELAY_SECONDS` - Initial delay in seconds before the first retry attempt (default: 1).
 - `RETRY_MAX_DELAY_SECONDS` - Maximum delay in seconds between retry attempts (default: 30).
 
