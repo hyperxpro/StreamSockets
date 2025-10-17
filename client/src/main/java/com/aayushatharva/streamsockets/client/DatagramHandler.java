@@ -44,6 +44,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
     private final Queue<BinaryWebSocketFrame> queuedFrames = new ConcurrentLinkedQueue<>();
     private final EventLoopGroup eventLoopGroup;
+    private final RetryManager retryManager = new RetryManager();
 
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
@@ -74,7 +75,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) future -> {
 
                     // If the future is successful, send the queued frames.
-                    // if the future is not successful, log the error and exit the JVM.
+                    // if the future is not successful, log the error and retry.
                     if (future.isSuccess()) {
                         log.debug("WebSocket connection authenticated successfully, sending queued frames");
 
@@ -84,7 +85,20 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                         }
                     } else {
                         log.error("Failed to authenticate WebSocket connection", future.cause());
-                        System.exit(1);
+                        retryManager.scheduleRetry(() -> {
+                            try {
+                                newWebSocketConnection();
+                            } catch (SSLException e) {
+                                log.error("Failed to create new WebSocket connection during retry", e);
+                                retryManager.scheduleRetry(() -> {
+                                    try {
+                                        newWebSocketConnection();
+                                    } catch (SSLException ex) {
+                                        log.error("Retry failed, giving up", ex);
+                                    }
+                                }, eventLoopGroup.next());
+                            }
+                        }, eventLoopGroup.next());
                     }
                 });
             }
@@ -152,16 +166,19 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
         webSocketClientFuture.addListener((ChannelFutureListener) future -> {
 
             // If the future is successful, set the WebSocket channel and WebSocket client handler.
-            // If the future is not successful, log the error and exit the JVM.
+            // If the future is not successful, log the error and retry.
             if (future.isSuccess()) {
                 wsChannel = future.channel();
                 webSocketClientHandler = wsChannel.pipeline().get(WebSocketClientHandler.class);
+                
+                // Reset retry counter on successful connection
+                retryManager.reset();
 
                 // Wait for the WebSocket connection to finish authentication before sending queued frames.
                 webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) handshakeFuture -> {
 
                     // If the authentication future is successful, send the queued frames.
-                    // If the authentication future is not successful, log the error and exit the JVM.
+                    // If the authentication future is not successful, log the error and retry.
                     if (handshakeFuture.isSuccess()) {
                         // Send queued frames
                         while (!queuedFrames.isEmpty()) {
@@ -169,15 +186,36 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                         }
 
                         // Retry the WebSocket connection if it is closed unexpectedly.
-                        wsChannel.closeFuture().addListener(closeFuture -> newWebSocketConnection());
+                        wsChannel.closeFuture().addListener(closeFuture -> {
+                            log.warn("WebSocket connection closed, will retry");
+                            retryManager.scheduleRetry(() -> {
+                                try {
+                                    newWebSocketConnection();
+                                } catch (SSLException e) {
+                                    log.error("Failed to create new WebSocket connection during retry", e);
+                                }
+                            }, eventLoopGroup.next());
+                        });
                     } else {
                         log.error("Failed to authenticate WebSocket connection", handshakeFuture.cause());
-                        System.exit(1);
+                        retryManager.scheduleRetry(() -> {
+                            try {
+                                newWebSocketConnection();
+                            } catch (SSLException e) {
+                                log.error("Failed to create new WebSocket connection during retry", e);
+                            }
+                        }, eventLoopGroup.next());
                     }
                 });
             } else {
                 log.error("Failed to connect to WebSocket server", future.cause());
-                System.exit(1);
+                retryManager.scheduleRetry(() -> {
+                    try {
+                        newWebSocketConnection();
+                    } catch (SSLException e) {
+                        log.error("Failed to create new WebSocket connection during retry", e);
+                    }
+                }, eventLoopGroup.next());
             }
         });
     }

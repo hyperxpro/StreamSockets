@@ -48,7 +48,9 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     // Use unreleasableBuffer to prevent accidental releases and reuse Gson for performance
     private static final ByteBuf PING = Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("PING".getBytes()));
+    private static final int PING_INTERVAL_MILLIS = envValueAsInt("PING_INTERVAL_MILLIS", 5000);
     private static final int PING_TIMEOUT_MILLIS = envValueAsInt("PING_TIMEOUT_MILLIS", 10_000);
+    private static final int MAX_PING_FAILURES = 5;
     private static final Gson GSON = new Gson();
     
     private final DatagramHandler datagramHandler;
@@ -58,6 +60,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     private ChannelHandlerContext ctx;
 
     private long lastPongTime;
+    private int consecutivePingFailures = 0;
 
     WebSocketClientHandler(DatagramHandler datagramHandler) {
         this.datagramHandler = datagramHandler;
@@ -90,24 +93,31 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             if (requestJson.get("success").getAsBoolean() && requestJson.get("message").getAsString().equalsIgnoreCase("connected")) {
                 log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
                 authenticationFuture.setSuccess();
+                
+                // Reset ping failure counter on successful connection
+                consecutivePingFailures = 0;
 
-                // Send a ping every 5 seconds
+                // Send a ping at configurable interval (default 5 seconds)
                 ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                     ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
-                }, 0, envValueAsInt("PING_INTERVAL_MILLIS", 1000), MILLISECONDS);
+                }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
 
                 lastPongTime = System.currentTimeMillis();
                 ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                     if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
-                        log.error("Ping timeout, exiting...");
-                        ctx.close();
-                        System.exit(1);
+                        consecutivePingFailures++;
+                        log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
+                        
+                        if (consecutivePingFailures >= MAX_PING_FAILURES) {
+                            log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
+                            ctx.close();
+                        }
                     }
                 }, 0, 1000, MILLISECONDS);
             } else {
                 log.error("Failed to connect to remote server: {}", requestJson.get("message").getAsString());
                 authenticationFuture.setFailure(new Exception(requestJson.get("message").getAsString()));
-                System.exit(1);
+                ctx.close();
             }
             textWebSocketFrame.release();
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
@@ -117,6 +127,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
         } else if (msg instanceof PongWebSocketFrame pongWebSocketFrame) {
             pongWebSocketFrame.content().release();
             lastPongTime = System.currentTimeMillis();
+            // Reset consecutive failures on successful pong
+            consecutivePingFailures = 0;
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
@@ -141,7 +153,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             websocketHandshakeFuture.setFailure(cause);
         }
 
-        System.exit(1);
+        ctx.close();
     }
 
     void newUdpConnection() {
