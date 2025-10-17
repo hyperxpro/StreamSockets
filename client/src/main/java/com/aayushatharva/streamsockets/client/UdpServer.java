@@ -56,6 +56,9 @@ public final class UdpServer {
         Bootstrap bootstrap = new Bootstrap()
                 .group(eventLoopGroup)
                 .channelFactory(channelFactory())
+                .option(io.netty.channel.ChannelOption.SO_RCVBUF, 1048576)
+                .option(io.netty.channel.ChannelOption.SO_SNDBUF, 1048576)
+                .option(io.netty.channel.ChannelOption.ALLOCATOR, io.netty.buffer.PooledByteBufAllocator.DEFAULT)
                 .handler(datagramHandler);
 
         AtomicBoolean reusePort = new AtomicBoolean(false);

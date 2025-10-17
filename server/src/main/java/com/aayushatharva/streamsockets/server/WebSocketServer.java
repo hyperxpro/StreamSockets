@@ -54,9 +54,14 @@ public final class WebSocketServer {
                 .group(parentGroup, childGroup)
                 .channelFactory(channelFactory())
                 .childHandler(new WebSocketServerInitializer(tokenAuthentication))
-                .option(ChannelOption.SO_BACKLOG, 128)
+                .option(ChannelOption.SO_BACKLOG, 1024)
+                .option(ChannelOption.SO_REUSEADDR, true)
                 .childOption(ChannelOption.TCP_NODELAY, true)
-                .childOption(ChannelOption.SO_KEEPALIVE, true);
+                .childOption(ChannelOption.SO_KEEPALIVE, true)
+                .childOption(ChannelOption.SO_RCVBUF, 65536)
+                .childOption(ChannelOption.SO_SNDBUF, 65536)
+                .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new io.netty.channel.WriteBufferWaterMark(32 * 1024, 64 * 1024))
+                .childOption(ChannelOption.ALLOCATOR, io.netty.buffer.PooledByteBufAllocator.DEFAULT);
 
         String bindAddress = envValue("BIND_ADDRESS", "0.0.0.0");
         int bindPort = envValueAsInt("BIND_PORT", 8080);

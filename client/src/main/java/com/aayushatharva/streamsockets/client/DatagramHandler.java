@@ -116,7 +116,21 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     }
 
     @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) {
+        // Flush pending writes for better batching
+        ctx.flush();
+    }
+
+    @Override
     public void channelInactive(ChannelHandlerContext ctx) {
+        // Clean up any queued frames
+        while (!queuedFrames.isEmpty()) {
+            BinaryWebSocketFrame frame = queuedFrames.poll();
+            if (frame != null) {
+                frame.release();
+            }
+        }
+        
         if (webSocketClientFuture != null) {
             webSocketClientFuture.channel().close();
         }

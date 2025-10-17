@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKER_TAG: server-1.0.0
+  DOCKER_TAG: server-1.1.0
 
 jobs:
   build-and-push:

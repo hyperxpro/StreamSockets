@@ -18,15 +18,18 @@
 package com.aayushatharva.streamsockets.server;
 
 import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollDatagramChannel;
 import io.netty.channel.socket.DatagramChannel;
@@ -44,9 +47,13 @@ import static io.netty.channel.ChannelFutureListener.CLOSE;
 @Log4j2
 final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
 
+    // Reuse Gson instance for better performance
+    private static final Gson GSON = new Gson();
+    
     private final TokenAuthentication tokenAuthentication;
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
+    private String routeCache; // Cache the route string to avoid repeated concatenation
 
     WebSocketServerHandler(TokenAuthentication tokenAuthentication) {
         this.tokenAuthentication = tokenAuthentication;
@@ -58,12 +65,21 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
             // Close existing connection if any and create a new connection
             // This is done to prevent multiple connections to the same remote server
             if (socketAddress != null) {
-                udpChannel.close().addListener((ChannelFutureListener) future -> newConnection(textWebSocketFrame, ctx));
+                // Retain the frame since it will be used in the listener callback
+                textWebSocketFrame.retain();
+                udpChannel.close().addListener((ChannelFutureListener) future -> {
+                    try {
+                        newConnection(textWebSocketFrame, ctx);
+                    } finally {
+                        textWebSocketFrame.release();
+                    }
+                });
             } else {
                 newConnection(textWebSocketFrame, ctx);
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content(), socketAddress));
+            // Retain content since it's being passed to another channel
+            udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
@@ -72,6 +88,12 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 referenceCounted.release();
             }
         }
+    }
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) {
+        // Flush pending writes for better batching
+        ctx.flush();
     }
 
     @Override
@@ -87,19 +109,23 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
             int port = requestJson.get("port").getAsInt();
             socketAddress = new InetSocketAddress(address, port);
 
+            // Cache the route string for reuse
+            routeCache = address + ':' + port;
+
             // Check if the route is allowed
-            if (!tokenAuthentication.containsRoute(address + ':' + port)) {
+            if (!tokenAuthentication.containsRoute(routeCache)) {
                 JsonObject responseJson = new JsonObject();
                 responseJson.addProperty("success", false);
                 responseJson.addProperty("message", "Route is not allowed");
-                ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
+                ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(responseJson))).addListener(CLOSE);
+                return;
             }
         } catch (Exception e) {
             JsonObject responseJson = new JsonObject();
             responseJson.addProperty("success", false);
             responseJson.addProperty("message", "Invalid address or port");
 
-            ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
+            ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(responseJson))).addListener(CLOSE);
             return;
         }
 
@@ -112,7 +138,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 udpChannel = future.channel();
                 responseJson.addProperty("success", true);
                 responseJson.addProperty("message", "connected");
-                ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString()));
+                ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(responseJson)));
 
                 // If the WebSocket connection is closed, close the UDP channel
                 ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
@@ -125,7 +151,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 responseJson.addProperty("status", "failed");
                 responseJson.addProperty("message", future.cause().getMessage());
 
-                ctx.writeAndFlush(new TextWebSocketFrame(responseJson.toString())).addListener(CLOSE);
+                ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(responseJson))).addListener(CLOSE);
             }
         });
     }
@@ -134,6 +160,9 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         Bootstrap bootstrap = new Bootstrap()
                 .group(ctx.channel().eventLoop())
                 .channelFactory(channelFactory())
+                .option(ChannelOption.SO_RCVBUF, 1048576)
+                .option(ChannelOption.SO_SNDBUF, 1048576)
+                .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 .handler(new DownstreamHandler(ctx.channel()));
 
         return bootstrap.connect(socketAddress);
