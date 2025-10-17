@@ -78,8 +78,14 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 newConnection(textWebSocketFrame, ctx);
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            // Retain content since it's being passed to another channel
-            udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
+            // Check if UDP connection is established before writing
+            if (udpChannel == null || !udpChannel.isActive()) {
+                log.warn("{} received binary frame before UDP connection is established", ctx.channel().remoteAddress());
+                binaryWebSocketFrame.release();
+            } else {
+                // Retain content since it's being passed to another channel
+                udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
+            }
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
