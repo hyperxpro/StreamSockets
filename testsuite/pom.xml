@@ -53,14 +53,38 @@
 
         <dependency>
             <groupId>com.aayushatharva.streamsockets</groupId>
+            <artifactId>common</artifactId>
+            <version>${parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.aayushatharva.streamsockets</groupId>
+            <artifactId>authentication-server</artifactId>
+            <version>${parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.aayushatharva.streamsockets</groupId>
             <artifactId>server</artifactId>
             <version>${parent.version}</version>
+            <scope>test</scope>
         </dependency>
 
         <dependency>
             <groupId>com.aayushatharva.streamsockets</groupId>
             <artifactId>client</artifactId>
             <version>${parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/org.yaml/snakeyaml -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>2.5</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 

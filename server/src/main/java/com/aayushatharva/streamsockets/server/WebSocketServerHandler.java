@@ -37,6 +37,7 @@ import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
 
@@ -50,36 +51,106 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     // Reuse Gson instance for better performance
     private static final Gson GSON = new Gson();
     
+    // AttributeKeys for reading protocol information
+    private static final AttributeKey<Boolean> NEW_PROTOCOL_KEY = AttributeKey.valueOf("newProtocol");
+    private static final AttributeKey<String> ROUTE_ADDRESS_KEY = AttributeKey.valueOf("routeAddress");
+    private static final AttributeKey<String> ROUTE_PORT_KEY = AttributeKey.valueOf("routePort");
+    
     private final TokenAuthentication tokenAuthentication;
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
     private String routeCache; // Cache the route string to avoid repeated concatenation
+    private boolean newProtocol; // Flag to track which protocol version client is using
 
-    WebSocketServerHandler(TokenAuthentication tokenAuthentication) {
+    WebSocketServerHandler(TokenAuthentication tokenAuthentication, boolean newProtocol) {
         this.tokenAuthentication = tokenAuthentication;
+        this.newProtocol = newProtocol;
+    }
+
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        // Check for new protocol from channel attributes
+        Boolean newProtocolAttr = ctx.channel().attr(NEW_PROTOCOL_KEY).get();
+        if (newProtocolAttr != null) {
+            newProtocol = newProtocolAttr;
+        }
+        
+        // If using new protocol, establish connection immediately using headers
+        if (newProtocol) {
+            String address = ctx.channel().attr(ROUTE_ADDRESS_KEY).get();
+            String portStr = ctx.channel().attr(ROUTE_PORT_KEY).get();
+            
+            try {
+                int port = Integer.parseInt(portStr);
+                socketAddress = new InetSocketAddress(address, port);
+                routeCache = address + ':' + port;
+
+                // Check if the route is allowed
+                if (!tokenAuthentication.containsRoute(routeCache)) {
+                    log.error("{} attempted to connect to unauthorized route: {}", ctx.channel().remoteAddress(), routeCache);
+                    ctx.close();
+                    return;
+                }
+
+                // Connect to remote server immediately
+                connectToRemote(ctx).addListener((ChannelFutureListener) future -> {
+                    if (future.isSuccess()) {
+                        log.info("{} connected to remote server: {} (new protocol)", ctx.channel().remoteAddress(), socketAddress);
+                        udpChannel = future.channel();
+
+                        // If the WebSocket connection is closed, close the UDP channel
+                        ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
+                            log.info("{} disconnected from remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+                            udpChannel.close();
+                        });
+                    } else {
+                        log.error("{} failed to connect to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+                        ctx.close();
+                    }
+                });
+            } catch (Exception e) {
+                log.error("{} invalid route parameters: address={}, port={}", ctx.channel().remoteAddress(), address, portStr);
+                ctx.close();
+            }
+        }
+        
+        super.channelActive(ctx);
     }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof TextWebSocketFrame textWebSocketFrame) {
-            // Close existing connection if any and create a new connection
-            // This is done to prevent multiple connections to the same remote server
-            if (socketAddress != null) {
-                // Retain the frame since it will be used in the listener callback
-                textWebSocketFrame.retain();
-                udpChannel.close().addListener((ChannelFutureListener) future -> {
-                    try {
-                        newConnection(textWebSocketFrame, ctx);
-                    } finally {
-                        textWebSocketFrame.release();
-                    }
-                });
+            // Old protocol: handle JSON-based connection setup
+            if (!newProtocol) {
+                // Close existing connection if any and create a new connection
+                // This is done to prevent multiple connections to the same remote server
+                if (socketAddress != null) {
+                    // Retain the frame since it will be used in the listener callback
+                    textWebSocketFrame.retain();
+                    udpChannel.close().addListener((ChannelFutureListener) future -> {
+                        try {
+                            newConnectionFromJson(textWebSocketFrame, ctx);
+                        } finally {
+                            textWebSocketFrame.release();
+                        }
+                    });
+                } else {
+                    newConnectionFromJson(textWebSocketFrame, ctx);
+                }
             } else {
-                newConnection(textWebSocketFrame, ctx);
+                // New protocol: text frames are not expected, ignore or log
+                log.warn("{} received unexpected text frame with new protocol", ctx.channel().remoteAddress());
+                textWebSocketFrame.release();
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            // Retain content since it's being passed to another channel
-            udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
+            // Check if udpChannel and socketAddress are ready
+            if (udpChannel != null && socketAddress != null) {
+                // Retain content since it's being passed to another channel
+                udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
+            } else {
+                log.warn("{} received binary frame before UDP connection is established", ctx.channel().remoteAddress());
+                binaryWebSocketFrame.release();
+            }
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
 
@@ -101,8 +172,8 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         log.error("WebSocketServerHandler exception", cause);
     }
 
-    private void newConnection(TextWebSocketFrame textWebSocketFrame, ChannelHandlerContext ctx) {
-        // Validate address and port
+    private void newConnectionFromJson(TextWebSocketFrame textWebSocketFrame, ChannelHandlerContext ctx) {
+        // Validate address and port from JSON (old protocol)
         try {
             JsonObject requestJson = JsonParser.parseString(textWebSocketFrame.text()).getAsJsonObject();
             String address = requestJson.get("address").getAsString();

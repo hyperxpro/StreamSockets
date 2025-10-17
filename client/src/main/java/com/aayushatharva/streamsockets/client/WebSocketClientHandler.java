@@ -54,6 +54,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     private static final Gson GSON = new Gson();
     
     private final DatagramHandler datagramHandler;
+    private final boolean useNewProtocol;
 
     private ChannelPromise websocketHandshakeFuture;
     private ChannelPromise authenticationFuture;
@@ -62,8 +63,9 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     private long lastPongTime;
     private int consecutivePingFailures = 0;
 
-    WebSocketClientHandler(DatagramHandler datagramHandler) {
+    WebSocketClientHandler(DatagramHandler datagramHandler, boolean useNewProtocol) {
         this.datagramHandler = datagramHandler;
+        this.useNewProtocol = useNewProtocol;
     }
 
     @Override
@@ -77,7 +79,35 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
         // If the handshake is complete, create a new UDP connection on server end and set the handshake future to success
         if (evt instanceof ClientHandshakeStateEvent event && event == HANDSHAKE_COMPLETE) {
-            newUdpConnection();
+            if (!useNewProtocol) {
+                // Old protocol: send connection request via JSON
+                newUdpConnection();
+            } else {
+                // New protocol: connection already established via headers, mark as ready
+                log.info("Connected to remote server: {} (new protocol)", ctx.channel().remoteAddress());
+                authenticationFuture.setSuccess();
+                
+                // Reset ping failure counter on successful connection
+                consecutivePingFailures = 0;
+
+                // Send a ping at configurable interval (default 5 seconds)
+                ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                    ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
+                }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
+
+                lastPongTime = System.currentTimeMillis();
+                ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                    if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
+                        consecutivePingFailures++;
+                        log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
+                        
+                        if (consecutivePingFailures >= MAX_PING_FAILURES) {
+                            log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
+                            ctx.close();
+                        }
+                    }
+                }, 0, 1000, MILLISECONDS);
+            }
             websocketHandshakeFuture.setSuccess();
             return;
         }
