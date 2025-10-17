@@ -99,15 +99,14 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 lastPongTime = System.currentTimeMillis();
                 ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                     if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
-                        log.error("Ping timeout, exiting...");
+                        log.error("Ping timeout, closing connection...");
                         ctx.close();
-                        System.exit(1);
                     }
                 }, 0, 1000, MILLISECONDS);
             } else {
                 log.error("Failed to connect to remote server: {}", requestJson.get("message").getAsString());
                 authenticationFuture.setFailure(new Exception(requestJson.get("message").getAsString()));
-                System.exit(1);
+                ctx.close();
             }
             textWebSocketFrame.release();
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
@@ -141,7 +140,7 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             websocketHandshakeFuture.setFailure(cause);
         }
 
-        System.exit(1);
+        ctx.close();
     }
 
     void newUdpConnection() {
