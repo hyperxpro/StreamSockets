@@ -73,6 +73,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         Boolean newProtocolAttr = ctx.channel().attr(NEW_PROTOCOL_KEY).get();
         if (newProtocolAttr != null) {
             newProtocol = newProtocolAttr;
+            log.info("{} channel active with new protocol: {}", ctx.channel().remoteAddress(), newProtocol);
         }
         
         // If using new protocol, establish connection immediately using headers
@@ -93,10 +94,13 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 }
 
                 // Connect to remote server immediately
-                connectToRemote(ctx).addListener((ChannelFutureListener) future -> {
-                    if (future.isSuccess()) {
+                ChannelFuture connectFuture = connectToRemote(ctx);
+                
+                // For UDP, connect() should complete almost immediately
+                if (connectFuture.isDone()) {
+                    if (connectFuture.isSuccess()) {
                         log.info("{} connected to remote server: {} (new protocol)", ctx.channel().remoteAddress(), socketAddress);
-                        udpChannel = future.channel();
+                        udpChannel = connectFuture.channel();
 
                         // If the WebSocket connection is closed, close the UDP channel
                         ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
@@ -104,10 +108,29 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                             udpChannel.close();
                         });
                     } else {
-                        log.error("{} failed to connect to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+                        log.error("{} failed to connect to remote server: {} (new protocol), cause: {}", 
+                                ctx.channel().remoteAddress(), socketAddress, connectFuture.cause());
                         ctx.close();
                     }
-                });
+                } else {
+                    // Add listener for async completion
+                    connectFuture.addListener((ChannelFutureListener) future -> {
+                        if (future.isSuccess()) {
+                            log.info("{} connected to remote server: {} (new protocol)", ctx.channel().remoteAddress(), socketAddress);
+                            udpChannel = future.channel();
+
+                            // If the WebSocket connection is closed, close the UDP channel
+                            ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
+                                log.info("{} disconnected from remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+                                udpChannel.close();
+                            });
+                        } else {
+                            log.error("{} failed to connect to remote server: {} (new protocol), cause: {}", 
+                                    ctx.channel().remoteAddress(), socketAddress, future.cause());
+                            ctx.close();
+                        }
+                    });
+                }
             } catch (Exception e) {
                 log.error("{} invalid route parameters: address={}, port={}", ctx.channel().remoteAddress(), address, portStr);
                 ctx.close();
