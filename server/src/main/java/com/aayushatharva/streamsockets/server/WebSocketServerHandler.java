@@ -57,6 +57,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     private static final AttributeKey<String> ROUTE_PORT_KEY = AttributeKey.valueOf("routePort");
     
     private final TokenAuthentication tokenAuthentication;
+    private final java.util.Queue<BinaryWebSocketFrame> pendingFrames = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
     private String routeCache; // Cache the route string to avoid repeated concatenation
@@ -68,56 +69,48 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     }
 
     @Override
-    public void channelActive(ChannelHandlerContext ctx) throws Exception {
-        // Check for new protocol from channel attributes
-        Boolean newProtocolAttr = ctx.channel().attr(NEW_PROTOCOL_KEY).get();
-        if (newProtocolAttr != null) {
-            newProtocol = newProtocolAttr;
-            log.info("{} channel active with new protocol: {}", ctx.channel().remoteAddress(), newProtocol);
-        }
-        
-        // If using new protocol, establish connection immediately using headers
-        if (newProtocol) {
-            String address = ctx.channel().attr(ROUTE_ADDRESS_KEY).get();
-            String portStr = ctx.channel().attr(ROUTE_PORT_KEY).get();
-            
-            try {
-                int port = Integer.parseInt(portStr);
-                socketAddress = new InetSocketAddress(address, port);
-                routeCache = address + ':' + port;
-
-                // Check if the route is allowed
-                if (!tokenAuthentication.containsRoute(routeCache)) {
-                    log.error("{} attempted to connect to unauthorized route: {}", ctx.channel().remoteAddress(), routeCache);
-                    ctx.close();
-                    return;
-                }
-
-                // Connect to remote server immediately
-                ChannelFuture connectFuture = connectToRemote(ctx);
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        // Handle WebSocket handshake complete event for new protocol
+        if (evt instanceof io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler.HandshakeComplete) {
+            // Check for new protocol from channel attributes
+            Boolean newProtocolAttr = ctx.channel().attr(NEW_PROTOCOL_KEY).get();
+            if (newProtocolAttr != null && newProtocolAttr) {
+                newProtocol = true;
+                log.info("{} WebSocket handshake complete with new protocol", ctx.channel().remoteAddress());
                 
-                // For UDP, connect() should complete almost immediately
-                if (connectFuture.isDone()) {
-                    if (connectFuture.isSuccess()) {
-                        log.info("{} connected to remote server: {} (new protocol)", ctx.channel().remoteAddress(), socketAddress);
-                        udpChannel = connectFuture.channel();
+                String address = ctx.channel().attr(ROUTE_ADDRESS_KEY).get();
+                String portStr = ctx.channel().attr(ROUTE_PORT_KEY).get();
+                
+                try {
+                    int port = Integer.parseInt(portStr);
+                    socketAddress = new InetSocketAddress(address, port);
+                    routeCache = address + ':' + port;
 
-                        // If the WebSocket connection is closed, close the UDP channel
-                        ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
-                            log.info("{} disconnected from remote server: {}", ctx.channel().remoteAddress(), socketAddress);
-                            udpChannel.close();
-                        });
-                    } else {
-                        log.error("{} failed to connect to remote server: {} (new protocol), cause: {}", 
-                                ctx.channel().remoteAddress(), socketAddress, connectFuture.cause());
+                    // Check if the route is allowed
+                    if (!tokenAuthentication.containsRoute(routeCache)) {
+                        log.error("{} attempted to connect to unauthorized route: {}", ctx.channel().remoteAddress(), routeCache);
                         ctx.close();
+                        return;
                     }
-                } else {
-                    // Add listener for async completion
+
+                    // Connect to remote server immediately
+                    ChannelFuture connectFuture = connectToRemote(ctx);
+                    log.debug("{} initiated UDP connection to {} (new protocol)", ctx.channel().remoteAddress(), socketAddress);
+                    
+                    // Always use listener to ensure udpChannel is set correctly
                     connectFuture.addListener((ChannelFutureListener) future -> {
                         if (future.isSuccess()) {
                             log.info("{} connected to remote server: {} (new protocol)", ctx.channel().remoteAddress(), socketAddress);
                             udpChannel = future.channel();
+
+                            // Send any pending frames that arrived before the UDP channel was ready
+                            while (!pendingFrames.isEmpty()) {
+                                BinaryWebSocketFrame frame = pendingFrames.poll();
+                                if (frame != null) {
+                                    udpChannel.writeAndFlush(new DatagramPacket(frame.content(), socketAddress));
+                                    frame.release();
+                                }
+                            }
 
                             // If the WebSocket connection is closed, close the UDP channel
                             ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
@@ -130,13 +123,19 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                             ctx.close();
                         }
                     });
+                } catch (Exception e) {
+                    log.error("{} invalid route parameters: address={}, port={}", ctx.channel().remoteAddress(), address, portStr, e);
+                    ctx.close();
                 }
-            } catch (Exception e) {
-                log.error("{} invalid route parameters: address={}, port={}", ctx.channel().remoteAddress(), address, portStr);
-                ctx.close();
             }
         }
-        
+        super.userEventTriggered(ctx, evt);
+    }
+
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        // channelActive is called before WebSocket handshake, so we can't use it for new protocol
+        // The new protocol connection will be established in userEventTriggered after handshake
         super.channelActive(ctx);
     }
 
@@ -168,8 +167,8 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
             // Check if UDP connection is established before writing
             if (udpChannel == null || !udpChannel.isActive()) {
-                log.warn("{} received binary frame before UDP connection is established", ctx.channel().remoteAddress());
-                binaryWebSocketFrame.release();
+                // Queue the frame to be sent once the UDP channel is ready
+                pendingFrames.add(binaryWebSocketFrame.retain());
             } else {
                 // Retain content since it's being passed to another channel
                 udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
@@ -268,5 +267,17 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         } else {
             return NioDatagramChannel::new;
         }
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        // Clean up any pending frames when the channel becomes inactive
+        while (!pendingFrames.isEmpty()) {
+            BinaryWebSocketFrame frame = pendingFrames.poll();
+            if (frame != null) {
+                frame.release();
+            }
+        }
+        super.channelInactive(ctx);
     }
 }
