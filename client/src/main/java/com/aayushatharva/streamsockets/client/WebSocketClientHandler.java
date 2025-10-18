@@ -155,7 +155,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             datagramHandler.writeToUdpClient(binaryWebSocketFrame.content().retain());
             binaryWebSocketFrame.release();
         } else if (msg instanceof PongWebSocketFrame pongWebSocketFrame) {
-            pongWebSocketFrame.content().release();
+            // Release the frame itself (content will be released automatically)
+            pongWebSocketFrame.release();
             lastPongTime = System.currentTimeMillis();
             // Reset consecutive failures on successful pong
             consecutivePingFailures = 0;

@@ -90,12 +90,14 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                 // If account is null, return unauthorized
                 if (account == null) {
                     ctx.writeAndFlush(UNAUTHORIZED_RESPONSE.duplicate()).addListener(CLOSE);
+                    request.release();
                     return;
                 }
 
                 // If account is not leased, return forbidden
                 if (!tokenAuthentication.leaseAccount(account)) {
                     ctx.writeAndFlush(FORBIDDEN_RESPONSE.duplicate()).addListener(CLOSE);
+                    request.release();
                     return;
                 }
 
@@ -117,6 +119,7 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                 ctx.fireChannelRead(msg);
             } else {
                 ctx.writeAndFlush(BAD_REQUEST_RESPONSE.duplicate()).addListener(CLOSE);
+                request.release();
             }
         }
     }

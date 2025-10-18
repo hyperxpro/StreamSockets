@@ -41,6 +41,11 @@ final class DownstreamHandler extends ChannelInboundHandlerAdapter {
             packet.release();
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
+            
+            // Release the message if it is a reference counted object
+            if (msg instanceof io.netty.util.ReferenceCounted referenceCounted) {
+                referenceCounted.release();
+            }
         }
     }
 
