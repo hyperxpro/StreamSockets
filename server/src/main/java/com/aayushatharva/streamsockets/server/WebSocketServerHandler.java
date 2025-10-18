@@ -172,6 +172,8 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
             } else {
                 // Retain content since it's being passed to another channel
                 udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
+                // Release the frame after content has been retained and sent
+                binaryWebSocketFrame.release();
             }
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
