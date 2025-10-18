@@ -29,11 +29,11 @@ import io.netty.channel.socket.DatagramPacket;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
+import org.jctools.queues.MpscUnboundedArrayQueue;
 
 import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
 import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * This class receives {@link DatagramPacket} from the UDP client and sends them to the WebSocket server.
@@ -42,7 +42,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 @ChannelHandler.Sharable
 public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
-    private final Queue<BinaryWebSocketFrame> queuedFrames = new ConcurrentLinkedQueue<>();
+    private final Queue<BinaryWebSocketFrame> queuedFrames = new MpscUnboundedArrayQueue<>(128);
     private final EventLoopGroup eventLoopGroup;
     private final RetryManager retryManager = new RetryManager();
 
@@ -77,7 +77,9 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                     // If the future is successful, send the queued frames.
                     // if the future is not successful, log the error and retry.
                     if (future.isSuccess()) {
-                        log.debug("WebSocket connection authenticated successfully, sending queued frames");
+                        if (log.isDebugEnabled()) {
+                            log.debug("WebSocket connection authenticated successfully, sending queued frames");
+                        }
 
                         // Send queued frames
                         while (!queuedFrames.isEmpty()) {

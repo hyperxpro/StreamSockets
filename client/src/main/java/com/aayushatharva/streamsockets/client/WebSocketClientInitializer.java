@@ -38,6 +38,10 @@ import static io.netty.handler.codec.http.websocketx.WebSocketVersion.V13;
 
 final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel> {
 
+    private static final String AUTH_TOKEN = envValue("AUTH_TOKEN", "");
+    private static final String ROUTE = envValue("ROUTE", "127.0.0.1:8888");
+    private static final boolean USE_OLD_PROTOCOL = "true".equalsIgnoreCase(envValue("USE_OLD_PROTOCOL", "false"));
+
     private final DatagramHandler datagramHandler;
     private final URI uri;
     private final SslContext sslContext;
@@ -52,21 +56,17 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
     protected void initChannel(SocketChannel channel) {
         HttpHeaders headers = new DefaultHttpHeaders();
         headers.add("X-Auth-Type", "Token");
-        headers.add("X-Auth-Token", envValue("AUTH_TOKEN", ""));
-        
-        String route = envValue("ROUTE", "127.0.0.1:8888");
+        headers.add("X-Auth-Token", AUTH_TOKEN);
         
         // Use new protocol by default, allow opt-out via environment variable for backwards compatibility
-        boolean useOldProtocol = "true".equalsIgnoreCase(envValue("USE_OLD_PROTOCOL", "false"));
-        
-        if (useOldProtocol) {
+        if (USE_OLD_PROTOCOL) {
             // Old protocol: pass route via X-Auth-Route header (for backwards compatibility)
-            headers.add("X-Auth-Route", route);
+            headers.add("X-Auth-Route", ROUTE);
         } else {
             // New protocol (default): pass address and port via headers
-            int colonIndex = route.indexOf(':');
-            String address = route.substring(0, colonIndex);
-            String port = route.substring(colonIndex + 1);
+            int colonIndex = ROUTE.indexOf(':');
+            String address = ROUTE.substring(0, colonIndex);
+            String port = ROUTE.substring(colonIndex + 1);
             
             headers.add("X-Route-Address", address);
             headers.add("X-Route-Port", port);
@@ -87,6 +87,6 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
         channel.pipeline().addLast(new HttpClientCodec());
         channel.pipeline().addLast(new HttpObjectAggregator(8192));
         channel.pipeline().addLast(new WebSocketClientProtocolHandler(handshaker, true, false));
-        channel.pipeline().addLast(new WebSocketClientHandler(datagramHandler, !useOldProtocol));
+        channel.pipeline().addLast(new WebSocketClientHandler(datagramHandler, !USE_OLD_PROTOCOL));
     }
 }

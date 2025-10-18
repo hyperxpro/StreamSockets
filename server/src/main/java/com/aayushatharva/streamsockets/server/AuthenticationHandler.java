@@ -20,6 +20,7 @@ package com.aayushatharva.streamsockets.server;
 import com.aayushatharva.streamsockets.authentication.server.Accounts;
 import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
@@ -42,10 +43,16 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
 
     private final TokenAuthentication tokenAuthentication;
     
+    // Cached environment variable to avoid repeated system calls
+    private static final String CLIENT_IP_HEADER = System.getenv("CLIENT_IP_HEADER");
+    
     // AttributeKeys for storing protocol information
     private static final AttributeKey<Boolean> NEW_PROTOCOL_KEY = AttributeKey.valueOf("newProtocol");
     private static final AttributeKey<String> ROUTE_ADDRESS_KEY = AttributeKey.valueOf("routeAddress");
     private static final AttributeKey<String> ROUTE_PORT_KEY = AttributeKey.valueOf("routePort");
+    private static final AttributeKey<String> ROUTE_STRING_KEY = AttributeKey.valueOf("routeString");
+    private static final AttributeKey<String> ACCOUNT_NAME_KEY = AttributeKey.valueOf("accountName");
+    private static final AttributeKey<String> CLIENT_IP_KEY = AttributeKey.valueOf("clientIp");
     
     // Use Unpooled.unreleasableBuffer to prevent accidental releases of shared static content
     private static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(
@@ -63,14 +70,17 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof FullHttpRequest request) {
             if (request.headers().contains("X-Auth-Type", "Token", true)) {
+                // Cache channel reference to avoid repeated ctx.channel() calls
+                Channel channel = ctx.channel();
+                
                 String token = request.headers().get("X-Auth-Token");
                 String clientIp;
 
                 // If CLIENT_IP_HEADER is set, use that header to get the client IP
-                if (System.getenv("CLIENT_IP_HEADER") != null) {
-                    clientIp = request.headers().get(System.getenv("CLIENT_IP_HEADER"));
+                if (CLIENT_IP_HEADER != null) {
+                    clientIp = request.headers().get(CLIENT_IP_HEADER);
                 } else {
-                    clientIp = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress().getHostAddress();
+                    clientIp = ((InetSocketAddress) channel.remoteAddress()).getAddress().getHostAddress();
                 }
 
                 // Support both old and new protocol for route information
@@ -79,7 +89,11 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                 
                 if (newProtocol) {
                     // New protocol: construct route from address and port headers
-                    route = request.headers().get("X-Route-Address") + ":" + request.headers().get("X-Route-Port");
+                    // Build the route string once here to avoid repeated concatenation
+                    String address = request.headers().get("X-Route-Address");
+                    String port = request.headers().get("X-Route-Port");
+                    route = new StringBuilder(address.length() + 1 + port.length())
+                            .append(address).append(':').append(port).toString();
                 } else {
                     // Old protocol: use X-Auth-Route header
                     route = request.headers().get("X-Auth-Route");
@@ -102,17 +116,20 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                 }
 
                 // Release account when the channel is closed
-                ctx.channel().closeFuture().addListener((ChannelFutureListener) future -> {
+                channel.closeFuture().addListener((ChannelFutureListener) future -> {
                     if (tokenAuthentication.releaseAccount(account)) {
                         log.info("{} disconnected from the server", account.getName());
                     }
                 });
 
-                // Store the protocol version in channel attributes for use by WebSocketServerHandler
-                ctx.channel().attr(NEW_PROTOCOL_KEY).set(newProtocol);
+                // Store the protocol version, pre-built route string, account name, and client IP in channel attributes
+                channel.attr(NEW_PROTOCOL_KEY).set(newProtocol);
+                channel.attr(ROUTE_STRING_KEY).set(route);
+                channel.attr(ACCOUNT_NAME_KEY).set(account.getName());
+                channel.attr(CLIENT_IP_KEY).set(clientIp);
                 if (newProtocol) {
-                    ctx.channel().attr(ROUTE_ADDRESS_KEY).set(request.headers().get("X-Route-Address"));
-                    ctx.channel().attr(ROUTE_PORT_KEY).set(request.headers().get("X-Route-Port"));
+                    channel.attr(ROUTE_ADDRESS_KEY).set(request.headers().get("X-Route-Address"));
+                    channel.attr(ROUTE_PORT_KEY).set(request.headers().get("X-Route-Port"));
                 }
 
                 ctx.pipeline().remove(this);

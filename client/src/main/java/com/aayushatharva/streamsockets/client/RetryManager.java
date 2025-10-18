@@ -62,7 +62,9 @@ final class RetryManager {
      */
     void reset() {
         retryCount.set(0);
-        log.debug("Retry counter reset");
+        if (log.isDebugEnabled()) {
+            log.debug("Retry counter reset");
+        }
     }
     
     /**
