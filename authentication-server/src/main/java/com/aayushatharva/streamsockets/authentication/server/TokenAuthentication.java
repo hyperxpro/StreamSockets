@@ -24,9 +24,12 @@ import org.apache.logging.log4j.Logger;
 import org.yaml.snakeyaml.Yaml;
 
 import java.io.FileInputStream;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 public final class TokenAuthentication {
@@ -34,6 +37,28 @@ public final class TokenAuthentication {
     private static final Logger log = LogManager.getLogger(TokenAuthentication.class);
     private final List<Accounts.Account> activeAccounts = new CopyOnWriteArrayList<>();
     private final Accounts accounts;
+    
+    // Performance optimization: O(1) token lookup instead of O(n) linear search
+    private final Map<String, AccountCache> tokenToAccountCache;
+    
+    /**
+     * Cache structure to avoid repeated lookups and parsing
+     */
+    private static final class AccountCache {
+        final Accounts.Account account;
+        final Set<String> routeSet;
+        final List<IPAddressString> parsedAllowedIps;
+        
+        AccountCache(Accounts.Account account) {
+            this.account = account;
+            // Pre-compute route set for O(1) lookup
+            this.routeSet = new HashSet<>(account.getRoutes());
+            // Pre-parse IP CIDR ranges to avoid repeated parsing
+            this.parsedAllowedIps = account.getAllowedIps().stream()
+                    .map(IPAddressString::new)
+                    .toList();
+        }
+    }
 
     public TokenAuthentication(String accountConfigFile) {
         Yaml yaml = new Yaml();
@@ -42,6 +67,13 @@ public final class TokenAuthentication {
         } catch (Exception e) {
             throw new RuntimeException("Failed to load configuration file: " + accountConfigFile, e);
         }
+        
+        if (hasDuplicateTokens(accounts.getAccounts())) {
+            throw new IllegalArgumentException("Each account must have a unique token");
+        }
+        
+        // Build token lookup cache for performance
+        this.tokenToAccountCache = buildTokenCache(accounts.getAccounts());
     }
 
     public TokenAuthentication(Accounts accounts) {
@@ -50,10 +82,27 @@ public final class TokenAuthentication {
         if (hasDuplicateTokens(accounts.getAccounts())) {
             throw new IllegalArgumentException("Each account must have a unique token");
         }
+        
+        // Build token lookup cache for performance
+        this.tokenToAccountCache = buildTokenCache(accounts.getAccounts());
+    }
+    
+    /**
+     * Build a HashMap for O(1) token lookup with pre-computed route sets and parsed IPs.
+     * This significantly improves authentication performance, especially with many accounts.
+     */
+    private static Map<String, AccountCache> buildTokenCache(List<Accounts.Account> accounts) {
+        Map<String, AccountCache> cache = new HashMap<>(accounts.size());
+        for (Accounts.Account account : accounts) {
+            cache.put(account.getToken(), new AccountCache(account));
+        }
+        log.info("Built authentication cache for {} accounts", cache.size());
+        return cache;
     }
 
     /**
      * Authenticate a token for a route and client IP.
+     * Optimized with O(1) token lookup and pre-parsed CIDR ranges.
      *
      * @param token    The token to authenticate.
      * @param route    The route to which client wants to connect to.
@@ -61,33 +110,52 @@ public final class TokenAuthentication {
      * @return {@link Accounts.Account} if the token is valid and the client IP is allowed, otherwise null.
      */
     public Accounts.Account authenticate(String token, String route, String clientIp) {
-        for (Accounts.Account account : accounts.getAccounts()) {
-            if (account.getToken().equals(token)) {
-                if (account.getRoutes().contains(route)) {
-                    for (String allowedIp : account.getAllowedIps()) {
-                        if (isIpInCidr(clientIp, allowedIp)) {
-                            return account;
-                        }
-                    }
-                    log.debug("Client IP: {} is not allowed for the token: {}", clientIp, token);
-                } else {
-                    log.debug("Route does not match for Client IP: {}", clientIp);
-                }
-            } else {
+        // O(1) token lookup instead of O(n) linear search
+        AccountCache accountCache = tokenToAccountCache.get(token);
+        
+        if (accountCache == null) {
+            if (log.isDebugEnabled()) {
                 log.debug("Token does not match for Client IP: {}", clientIp);
             }
+            return null;
+        }
+        
+        // O(1) route lookup using HashSet instead of List.contains()
+        if (!accountCache.routeSet.contains(route)) {
+            if (log.isDebugEnabled()) {
+                log.debug("Route {} does not match for Client IP: {}", route, clientIp);
+            }
+            return null;
+        }
+        
+        // Check IP with pre-parsed CIDR ranges
+        IPAddressString clientIpAddress = new IPAddressString(clientIp);
+        IPAddress clientIpParsed = clientIpAddress.getAddress();
+        
+        for (IPAddressString allowedIpCidr : accountCache.parsedAllowedIps) {
+            IPAddress allowedRange = allowedIpCidr.getAddress();
+            if (allowedRange.contains(clientIpParsed)) {
+                return accountCache.account;
+            }
+        }
+        
+        if (log.isDebugEnabled()) {
+            log.debug("Client IP: {} is not allowed for the token: {}", clientIp, token);
         }
         return null;
     }
 
     /**
      * Check if the accounts contain a route.
+     * Optimized with cached route sets for faster lookup.
      *
      * @param route    The route to check.
      * @return true if the accounts contain the route, false otherwise.
      */
     public boolean containsRoute(String route) {
-        return accounts.getAccounts().stream().anyMatch(account -> account.getRoutes().contains(route));
+        // Use cached route sets for O(1) lookup per account instead of List.contains()
+        return tokenToAccountCache.values().stream()
+                .anyMatch(cache -> cache.routeSet.contains(route));
     }
 
     /**
@@ -115,14 +183,6 @@ public final class TokenAuthentication {
      */
     public boolean releaseAccount(Accounts.Account account) {
         return activeAccounts.remove(account);
-    }
-
-    private static boolean isIpInCidr(String ip, String cidr) {
-        IPAddressString ipAddressString = new IPAddressString(ip);
-        IPAddressString cidrAddressString = new IPAddressString(cidr);
-        IPAddress ipAddress = ipAddressString.getAddress();
-        IPAddress cidrAddress = cidrAddressString.getAddress();
-        return cidrAddress.contains(ipAddress);
     }
 
     private static boolean hasDuplicateTokens(List<Accounts.Account> accounts) {

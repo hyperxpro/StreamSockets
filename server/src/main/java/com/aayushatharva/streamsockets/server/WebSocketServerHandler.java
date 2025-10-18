@@ -18,9 +18,9 @@
 package com.aayushatharva.streamsockets.server;
 
 import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.Channel;
@@ -40,24 +40,29 @@ import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
+import org.jctools.queues.MpscUnboundedArrayQueue;
 
 import java.net.InetSocketAddress;
+import java.util.Queue;
 
 import static io.netty.channel.ChannelFutureListener.CLOSE;
 
 @Log4j2
 final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
 
-    // Reuse Gson instance for better performance
-    private static final Gson GSON = new Gson();
+    // Reuse ObjectMapper instance for better performance (thread-safe)
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     
     // AttributeKeys for reading protocol information
     private static final AttributeKey<Boolean> NEW_PROTOCOL_KEY = AttributeKey.valueOf("newProtocol");
     private static final AttributeKey<String> ROUTE_ADDRESS_KEY = AttributeKey.valueOf("routeAddress");
     private static final AttributeKey<String> ROUTE_PORT_KEY = AttributeKey.valueOf("routePort");
+    private static final AttributeKey<String> ROUTE_STRING_KEY = AttributeKey.valueOf("routeString");
+    private static final AttributeKey<String> ACCOUNT_NAME_KEY = AttributeKey.valueOf("accountName");
+    private static final AttributeKey<String> CLIENT_IP_KEY = AttributeKey.valueOf("clientIp");
     
     private final TokenAuthentication tokenAuthentication;
-    private final java.util.Queue<BinaryWebSocketFrame> pendingFrames = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final Queue<BinaryWebSocketFrame> pendingFrames = new MpscUnboundedArrayQueue<>(128);
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
     private String routeCache; // Cache the route string to avoid repeated concatenation
@@ -72,35 +77,50 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
         // Handle WebSocket handshake complete event for new protocol
         if (evt instanceof io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler.HandshakeComplete) {
+            // Cache channel reference to avoid repeated ctx.channel() calls
+            Channel channel = ctx.channel();
+            
             // Check for new protocol from channel attributes
-            Boolean newProtocolAttr = ctx.channel().attr(NEW_PROTOCOL_KEY).get();
+            Boolean newProtocolAttr = channel.attr(NEW_PROTOCOL_KEY).get();
             if (newProtocolAttr != null && newProtocolAttr) {
                 newProtocol = true;
-                log.info("{} WebSocket handshake complete with new protocol", ctx.channel().remoteAddress());
                 
-                String address = ctx.channel().attr(ROUTE_ADDRESS_KEY).get();
-                String portStr = ctx.channel().attr(ROUTE_PORT_KEY).get();
+                // Get account info and client IP from channel attributes
+                String accountName = channel.attr(ACCOUNT_NAME_KEY).get();
+                String clientIp = channel.attr(CLIENT_IP_KEY).get();
+                
+                log.info("account={}, clientIp={}, wsRemoteAddress={} - WebSocket handshake complete with new protocol", 
+                        accountName, clientIp, channel.remoteAddress());
+                
+                // Get pre-built route string from channel attributes (no string concatenation needed)
+                routeCache = channel.attr(ROUTE_STRING_KEY).get();
+                String address = channel.attr(ROUTE_ADDRESS_KEY).get();
+                String portStr = channel.attr(ROUTE_PORT_KEY).get();
                 
                 try {
                     int port = Integer.parseInt(portStr);
                     socketAddress = new InetSocketAddress(address, port);
-                    routeCache = address + ':' + port;
 
-                    // Check if the route is allowed
+                    // Check if the route is allowed (using cached route string)
                     if (!tokenAuthentication.containsRoute(routeCache)) {
-                        log.error("{} attempted to connect to unauthorized route: {}", ctx.channel().remoteAddress(), routeCache);
+                        log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - attempted to connect to unauthorized route", 
+                                accountName, clientIp, channel.remoteAddress(), routeCache);
                         ctx.close();
                         return;
                     }
 
                     // Connect to remote server immediately
                     ChannelFuture connectFuture = connectToRemote(ctx);
-                    log.debug("{} initiated UDP connection to {} (new protocol)", ctx.channel().remoteAddress(), socketAddress);
+                    if (log.isDebugEnabled()) {
+                        log.debug("account={}, clientIp={}, wsRemoteAddress={}, route={} - initiated UDP connection (new protocol)", 
+                                accountName, clientIp, channel.remoteAddress(), socketAddress);
+                    }
                     
                     // Always use listener to ensure udpChannel is set correctly
                     connectFuture.addListener((ChannelFutureListener) future -> {
                         if (future.isSuccess()) {
-                            log.info("{} connected to remote server: {} (new protocol)", ctx.channel().remoteAddress(), socketAddress);
+                            log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - connected to remote server", 
+                                    accountName, clientIp, channel.remoteAddress(), socketAddress);
                             udpChannel = future.channel();
 
                             // Send any pending frames that arrived before the UDP channel was ready
@@ -113,18 +133,20 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                             }
 
                             // If the WebSocket connection is closed, close the UDP channel
-                            ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
-                                log.info("{} disconnected from remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+                            channel.closeFuture().addListener((ChannelFutureListener) future1 -> {
+                                log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - disconnected from remote server", 
+                                        accountName, clientIp, channel.remoteAddress(), socketAddress);
                                 udpChannel.close();
                             });
                         } else {
-                            log.error("{} failed to connect to remote server: {} (new protocol), cause: {}", 
-                                    ctx.channel().remoteAddress(), socketAddress, future.cause());
+                            log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to connect to remote server, cause: {}", 
+                                    accountName, clientIp, channel.remoteAddress(), socketAddress, future.cause());
                             ctx.close();
                         }
                     });
                 } catch (Exception e) {
-                    log.error("{} invalid route parameters: address={}, port={}", ctx.channel().remoteAddress(), address, portStr, e);
+                    log.error("account={}, clientIp={}, wsRemoteAddress={} - invalid route parameters: address={}, port={}", 
+                            accountName, clientIp, channel.remoteAddress(), address, portStr, e);
                     ctx.close();
                 }
             }
@@ -197,54 +219,72 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     private void newConnectionFromJson(TextWebSocketFrame textWebSocketFrame, ChannelHandlerContext ctx) {
         // Validate address and port from JSON (old protocol)
         try {
-            JsonObject requestJson = JsonParser.parseString(textWebSocketFrame.text()).getAsJsonObject();
-            String address = requestJson.get("address").getAsString();
-            int port = requestJson.get("port").getAsInt();
+            JsonNode requestJson = OBJECT_MAPPER.readTree(textWebSocketFrame.text());
+            String address = requestJson.get("address").asText();
+            int port = requestJson.get("port").asInt();
             socketAddress = new InetSocketAddress(address, port);
 
-            // Cache the route string for reuse
-            routeCache = address + ':' + port;
+            // Build route string once using StringBuilder to avoid string concatenation
+            routeCache = new StringBuilder(address.length() + 1 + String.valueOf(port).length())
+                    .append(address).append(':').append(port).toString();
 
             // Check if the route is allowed
             if (!tokenAuthentication.containsRoute(routeCache)) {
-                JsonObject responseJson = new JsonObject();
-                responseJson.addProperty("success", false);
-                responseJson.addProperty("message", "Route is not allowed");
-                ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(responseJson))).addListener(CLOSE);
+                ObjectNode responseJson = OBJECT_MAPPER.createObjectNode();
+                responseJson.put("success", false);
+                responseJson.put("message", "Route is not allowed");
+                ctx.writeAndFlush(new TextWebSocketFrame(OBJECT_MAPPER.writeValueAsString(responseJson))).addListener(CLOSE);
                 return;
             }
         } catch (Exception e) {
-            JsonObject responseJson = new JsonObject();
-            responseJson.addProperty("success", false);
-            responseJson.addProperty("message", "Invalid address or port");
+            ObjectNode responseJson = OBJECT_MAPPER.createObjectNode();
+            responseJson.put("success", false);
+            responseJson.put("message", "Invalid address or port");
 
-            ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(responseJson))).addListener(CLOSE);
+            try {
+                ctx.writeAndFlush(new TextWebSocketFrame(OBJECT_MAPPER.writeValueAsString(responseJson))).addListener(CLOSE);
+            } catch (Exception ex) {
+                log.error("Failed to write error response", ex);
+                ctx.close();
+            }
             return;
         }
 
         // Connect to remote server and send response
         connectToRemote(ctx).addListener((ChannelFutureListener) future -> {
-            JsonObject responseJson = new JsonObject();
-            if (future.isSuccess()) {
-                log.info("{} connected to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+            try {
+                // Get account info and client IP from channel attributes
+                String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
+                String clientIp = ctx.channel().attr(CLIENT_IP_KEY).get();
+                
+                ObjectNode responseJson = OBJECT_MAPPER.createObjectNode();
+                if (future.isSuccess()) {
+                    log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - connected to remote server (old protocol)", 
+                            accountName, clientIp, ctx.channel().remoteAddress(), socketAddress);
 
-                udpChannel = future.channel();
-                responseJson.addProperty("success", true);
-                responseJson.addProperty("message", "connected");
-                ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(responseJson)));
+                    udpChannel = future.channel();
+                    responseJson.put("success", true);
+                    responseJson.put("message", "connected");
+                    ctx.writeAndFlush(new TextWebSocketFrame(OBJECT_MAPPER.writeValueAsString(responseJson)));
 
-                // If the WebSocket connection is closed, close the UDP channel
-                ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
-                    log.info("{} disconnected from remote server: {}", ctx.channel().remoteAddress(), socketAddress);
-                    udpChannel.close();
-                });
-            } else {
-                log.error("{} failed to connect to remote server: {}", ctx.channel().remoteAddress(), socketAddress);
+                    // If the WebSocket connection is closed, close the UDP channel
+                    ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
+                        log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - disconnected from remote server (old protocol)", 
+                                accountName, clientIp, ctx.channel().remoteAddress(), socketAddress);
+                        udpChannel.close();
+                    });
+                } else {
+                    log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to connect to remote server (old protocol)", 
+                            accountName, clientIp, ctx.channel().remoteAddress(), socketAddress);
 
-                responseJson.addProperty("status", "failed");
-                responseJson.addProperty("message", future.cause().getMessage());
+                    responseJson.put("status", "failed");
+                    responseJson.put("message", future.cause().getMessage());
 
-                ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(responseJson))).addListener(CLOSE);
+                    ctx.writeAndFlush(new TextWebSocketFrame(OBJECT_MAPPER.writeValueAsString(responseJson))).addListener(CLOSE);
+                }
+            } catch (Exception e) {
+                log.error("Failed to write connection response", e);
+                ctx.close();
             }
         });
     }

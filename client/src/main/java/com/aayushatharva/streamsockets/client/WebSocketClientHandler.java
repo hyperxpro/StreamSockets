@@ -17,9 +17,9 @@
 
 package com.aayushatharva.streamsockets.client;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
@@ -46,12 +46,13 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 @Log4j2
 public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
-    // Use unreleasableBuffer to prevent accidental releases and reuse Gson for performance
+    // Use unreleasableBuffer to prevent accidental releases and reuse ObjectMapper for performance (thread-safe)
     private static final ByteBuf PING = Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("PING".getBytes()));
     private static final int PING_INTERVAL_MILLIS = envValueAsInt("PING_INTERVAL_MILLIS", 5000);
     private static final int PING_TIMEOUT_MILLIS = envValueAsInt("PING_TIMEOUT_MILLIS", 10_000);
     private static final int MAX_PING_FAILURES = 5;
-    private static final Gson GSON = new Gson();
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String ROUTE = envValue("ROUTE", "127.0.0.1:8888");
     
     private final DatagramHandler datagramHandler;
     private final boolean useNewProtocol;
@@ -117,39 +118,46 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof TextWebSocketFrame textWebSocketFrame) {
-            JsonObject requestJson = JsonParser.parseString(textWebSocketFrame.text()).getAsJsonObject();
+            try {
+                JsonNode requestJson = OBJECT_MAPPER.readTree(textWebSocketFrame.text());
 
-            // If the server sends a success message, set the authentication future to success
-            if (requestJson.get("success").getAsBoolean() && requestJson.get("message").getAsString().equalsIgnoreCase("connected")) {
-                log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
-                authenticationFuture.setSuccess();
-                
-                // Reset ping failure counter on successful connection
-                consecutivePingFailures = 0;
+                // If the server sends a success message, set the authentication future to success
+                if (requestJson.get("success").asBoolean() && requestJson.get("message").asText().equalsIgnoreCase("connected")) {
+                    log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
+                    authenticationFuture.setSuccess();
+                    
+                    // Reset ping failure counter on successful connection
+                    consecutivePingFailures = 0;
 
-                // Send a ping at configurable interval (default 5 seconds)
-                ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                    ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
-                }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
+                    // Send a ping at configurable interval (default 5 seconds)
+                    ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                        ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
+                    }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
 
-                lastPongTime = System.currentTimeMillis();
-                ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                    if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
-                        consecutivePingFailures++;
-                        log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
-                        
-                        if (consecutivePingFailures >= MAX_PING_FAILURES) {
-                            log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
-                            ctx.close();
+                    lastPongTime = System.currentTimeMillis();
+                    ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                        if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
+                            consecutivePingFailures++;
+                            log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
+                            
+                            if (consecutivePingFailures >= MAX_PING_FAILURES) {
+                                log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
+                                ctx.close();
+                            }
                         }
-                    }
-                }, 0, 1000, MILLISECONDS);
-            } else {
-                log.error("Failed to connect to remote server: {}", requestJson.get("message").getAsString());
-                authenticationFuture.setFailure(new Exception(requestJson.get("message").getAsString()));
+                    }, 0, 1000, MILLISECONDS);
+                } else {
+                    log.error("Failed to connect to remote server: {}", requestJson.get("message").asText());
+                    authenticationFuture.setFailure(new Exception(requestJson.get("message").asText()));
+                    ctx.close();
+                }
+            } catch (Exception e) {
+                log.error("Failed to parse JSON response", e);
+                authenticationFuture.setFailure(e);
                 ctx.close();
+            } finally {
+                textWebSocketFrame.release();
             }
-            textWebSocketFrame.release();
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
             // Retain content before passing to datagram handler
             datagramHandler.writeToUdpClient(binaryWebSocketFrame.content().retain());
@@ -188,18 +196,23 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     void newUdpConnection() {
         authenticationFuture = ctx.newPromise();
-        String route = envValue("ROUTE", "127.0.0.1:8888");
 
         // Avoid splitting the route string twice
-        int colonIndex = route.indexOf(':');
-        String address = route.substring(0, colonIndex);
-        int port = Integer.parseInt(route.substring(colonIndex + 1));
+        int colonIndex = ROUTE.indexOf(':');
+        String address = ROUTE.substring(0, colonIndex);
+        int port = Integer.parseInt(ROUTE.substring(colonIndex + 1));
 
-        JsonObject requestJson = new JsonObject();
-        requestJson.addProperty("address", address);
-        requestJson.addProperty("port", port);
+        try {
+            ObjectNode requestJson = OBJECT_MAPPER.createObjectNode();
+            requestJson.put("address", address);
+            requestJson.put("port", port);
 
-        ctx.writeAndFlush(new TextWebSocketFrame(GSON.toJson(requestJson)));
+            ctx.writeAndFlush(new TextWebSocketFrame(OBJECT_MAPPER.writeValueAsString(requestJson)));
+        } catch (Exception e) {
+            log.error("Failed to create connection request JSON", e);
+            authenticationFuture.setFailure(e);
+            ctx.close();
+        }
     }
 
     boolean isReadyForWrite() {
