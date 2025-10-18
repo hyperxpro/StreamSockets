@@ -104,6 +104,8 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
             }
 
             BinaryWebSocketFrame binaryWebSocketFrame = new BinaryWebSocketFrame(packet.content().retain());
+            // Release the packet after content has been retained
+            packet.release();
 
             // If the WebSocket channel is active and ready for write, send the frame directly.
             // Else add the frame to the queue.
