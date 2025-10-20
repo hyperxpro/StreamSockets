@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  streamsockets-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile-Server
+    ports:
+      - "8080:8080"
+    environment:
+      # Server configuration
+      - AUTH_TOKEN_FILE=/config/auth_tokens.yml
+      
+      # New protocol multi-tunnel configuration
+      - UDP_TUNNEL_TIMEOUT_SECONDS=300        # Timeout for idle UDP tunnels (default: 300 seconds)
+      - MAX_UDP_TUNNELS_PER_CLIENT=10         # Maximum UDP tunnels per WebSocket connection (default: 10)
+      
+      # Ping configuration
+      - PING_INTERVAL_MILLIS=5000             # WebSocket ping interval (default: 5000ms)
+      - PING_TIMEOUT_MILLIS=10000             # Ping timeout threshold (default: 10000ms)
+    volumes:
+      - ./config:/config
+    networks:
+      - streamsockets-network
+
+  streamsockets-client:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile-Client
+    environment:
+      # Client configuration
+      - AUTH_TOKEN=your_auth_token_here
+      - ROUTE=127.0.0.1:8888                  # Target UDP server address:port
+      
+      # Protocol selection (for backwards compatibility testing)
+      - USE_OLD_PROTOCOL=false                 # Set to "true" to use old JSON-based protocol (default: false)
+      
+      # WebSocket server connection
+      - WS_SERVER=ws://streamsockets-server:8080
+      
+      # Ping configuration
+      - PING_INTERVAL_MILLIS=5000             # WebSocket ping interval (default: 5000ms)
+      - PING_TIMEOUT_MILLIS=10000             # Ping timeout threshold (default: 10000ms)
+    depends_on:
+      - streamsockets-server
+    networks:
+      - streamsockets-network
+
+networks:
+  streamsockets-network:
+    driver: bridge
