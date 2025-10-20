@@ -68,6 +68,17 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 socketAddress = packet.sender();
                 udpChannel = ctx.channel();
             } else if (!isInetSocketAddressEquals(socketAddress, packet.sender())) {
+                // Check if using new protocol - new protocol doesn't support dynamic route changes
+                if (webSocketClientHandler.isUsingNewProtocol()) {
+                    // New protocol: only one route per connection (specified in headers at handshake)
+                    // Packets from different sender are dropped
+                    log.warn("New protocol does not support multiple UDP clients. Dropping packet from {}, expected {}", 
+                            packet.sender(), socketAddress);
+                    packet.release();
+                    return;
+                }
+                
+                // Old protocol: send text frame to change route
                 webSocketClientHandler.newUdpConnection();
                 socketAddress = packet.sender();
 
