@@ -17,6 +17,8 @@
 
 package com.aayushatharva.streamsockets.server;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
@@ -28,17 +30,31 @@ import lombok.extern.log4j.Log4j2;
 final class DownstreamHandler extends ChannelInboundHandlerAdapter {
 
     private final Channel channel;
+    private final int tunnelId;
+    private final boolean newProtocol;
 
-    DownstreamHandler(Channel channel) {
+    DownstreamHandler(Channel channel, int tunnelId, boolean newProtocol) {
         this.channel = channel;
+        this.tunnelId = tunnelId;
+        this.newProtocol = newProtocol;
     }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof DatagramPacket packet) {
-            // Retain content before passing to another channel, and release the packet
-            channel.writeAndFlush(new BinaryWebSocketFrame(packet.content().retain()));
-            packet.release();
+            if (newProtocol) {
+                // New protocol: prepend tunnel ID byte
+                ByteBuf content = packet.content();
+                ByteBuf frame = Unpooled.buffer(1 + content.readableBytes());
+                frame.writeByte(tunnelId);
+                frame.writeBytes(content);
+                channel.writeAndFlush(new BinaryWebSocketFrame(frame));
+                packet.release();
+            } else {
+                // Old protocol: no tunnel ID
+                channel.writeAndFlush(new BinaryWebSocketFrame(packet.content().retain()));
+                packet.release();
+            }
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
             

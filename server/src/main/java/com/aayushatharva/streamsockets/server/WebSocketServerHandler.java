@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
@@ -39,19 +40,30 @@ import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCounted;
+import io.netty.util.concurrent.ScheduledFuture;
 import lombok.extern.log4j.Log4j2;
 import org.jctools.queues.MpscUnboundedArrayQueue;
 
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 import static io.netty.channel.ChannelFutureListener.CLOSE;
 
 @Log4j2
 final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
 
-    // Reuse ObjectMapper instance for better performance (thread-safe)
+    // Reuse ObjectMapper instance and static buffers for better performance (thread-safe)
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final byte[] NEW_BYTES = "NEW".getBytes(StandardCharsets.UTF_8);
+    
+    // Configuration constants
+    private static final int UDP_TUNNEL_TIMEOUT_SECONDS = envValueAsInt("UDP_TUNNEL_TIMEOUT_SECONDS", 300);
+    private static final int MAX_UDP_TUNNELS_PER_CLIENT = envValueAsInt("MAX_UDP_TUNNELS_PER_CLIENT", 10);
     
     // AttributeKeys for reading protocol information
     private static final AttributeKey<Boolean> NEW_PROTOCOL_KEY = AttributeKey.valueOf("newProtocol");
@@ -63,8 +75,16 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     
     private final TokenAuthentication tokenAuthentication;
     private final Queue<BinaryWebSocketFrame> pendingFrames = new MpscUnboundedArrayQueue<>(128);
+    
+    // Multi-tunnel support for new protocol
+    private final ConcurrentHashMap<Integer, UdpTunnel> udpTunnels = new ConcurrentHashMap<>();
+    private final AtomicInteger nextTunnelId = new AtomicInteger(1);
+    private ScheduledFuture<?> timeoutCheckTask;
+    
+    // Legacy single tunnel support for old protocol
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
+    
     private String routeCache; // Cache the route string to avoid repeated concatenation
     private boolean newProtocol; // Flag to track which protocol version client is using
 
@@ -109,42 +129,9 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                         return;
                     }
 
-                    // Connect to remote server immediately
-                    ChannelFuture connectFuture = connectToRemote(ctx);
-                    if (log.isDebugEnabled()) {
-                        log.debug("account={}, clientIp={}, wsRemoteAddress={}, route={} - initiated UDP connection (new protocol)", 
-                                accountName, clientIp, channel.remoteAddress(), socketAddress);
-                    }
+                    // Create the first UDP tunnel
+                    createNewTunnel(ctx, accountName, clientIp, true);
                     
-                    // Always use listener to ensure udpChannel is set correctly
-                    connectFuture.addListener((ChannelFutureListener) future -> {
-                        if (future.isSuccess()) {
-                            log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - connected to remote server", 
-                                    accountName, clientIp, channel.remoteAddress(), socketAddress);
-                            udpChannel = future.channel();
-
-                            // Send any pending frames that arrived before the UDP channel was ready
-                            while (!pendingFrames.isEmpty()) {
-                                BinaryWebSocketFrame frame = pendingFrames.poll();
-                                if (frame != null) {
-                                    udpChannel.writeAndFlush(new DatagramPacket(frame.content(), socketAddress));
-                                    frame.release();
-                                }
-                            }
-
-                            // If the WebSocket connection is closed, close the UDP channel
-                            channel.closeFuture().addListener((ChannelFutureListener) future1 -> {
-                                log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - disconnected from remote server", 
-                                        accountName, clientIp, channel.remoteAddress(), socketAddress);
-                                udpChannel.close();
-                            });
-                        } else {
-                            log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to connect to remote server, cause: {}", 
-                                    accountName, clientIp, channel.remoteAddress(), socketAddress, future.cause());
-                            cleanupPendingFrames();
-                            ctx.close();
-                        }
-                    });
                 } catch (Exception e) {
                     log.error("account={}, clientIp={}, wsRemoteAddress={} - invalid route parameters: address={}, port={}", 
                             accountName, clientIp, channel.remoteAddress(), address, portStr, e);
@@ -184,24 +171,39 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                     newConnectionFromJson(textWebSocketFrame, ctx);
                 }
             } else {
-                // New protocol: text frames are not expected, ignore or log
-                // Get account info and client IP from channel attributes
-                String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
-                String clientIp = ctx.channel().attr(CLIENT_IP_KEY).get();
-                log.warn("account={}, clientIp={}, wsRemoteAddress={} - received unexpected text frame with new protocol", 
-                        accountName, clientIp, ctx.channel().remoteAddress());
+                // New protocol: handle "NEW" text frame to create additional UDP tunnels
+                String text = textWebSocketFrame.text();
+                if ("NEW".equals(text)) {
+                    String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
+                    String clientIp = ctx.channel().attr(CLIENT_IP_KEY).get();
+                    
+                    // Check if we've reached the max tunnel limit
+                    if (udpTunnels.size() >= MAX_UDP_TUNNELS_PER_CLIENT) {
+                        log.warn("account={}, clientIp={}, wsRemoteAddress={} - max UDP tunnels limit ({}) reached", 
+                                accountName, clientIp, ctx.channel().remoteAddress(), MAX_UDP_TUNNELS_PER_CLIENT);
+                        textWebSocketFrame.release();
+                        return;
+                    }
+                    
+                    // Create a new tunnel
+                    createNewTunnel(ctx, accountName, clientIp, false);
+                } else {
+                    // Unknown text frame
+                    String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
+                    String clientIp = ctx.channel().attr(CLIENT_IP_KEY).get();
+                    log.warn("account={}, clientIp={}, wsRemoteAddress={} - received unexpected text frame: {}", 
+                            accountName, clientIp, ctx.channel().remoteAddress(), text);
+                }
                 textWebSocketFrame.release();
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            // Check if UDP connection is established before writing
-            if (udpChannel == null || !udpChannel.isActive()) {
-                // Queue the frame to be sent once the UDP channel is ready
-                pendingFrames.add(binaryWebSocketFrame.retain());
+            // Extract tunnel ID from first byte
+            if (!newProtocol) {
+                // Old protocol: single tunnel, no ID
+                handleLegacyBinaryFrame(binaryWebSocketFrame);
             } else {
-                // Retain content since it's being passed to another channel
-                udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
-                // Release the frame after content has been retained and sent
-                binaryWebSocketFrame.release();
+                // New protocol: multi-tunnel with ID in first byte
+                handleMultiTunnelBinaryFrame(binaryWebSocketFrame);
             }
         } else {
             log.error("Unknown frame type: {}", msg.getClass().getName());
@@ -259,7 +261,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         }
 
         // Connect to remote server and send response
-        connectToRemote(ctx).addListener((ChannelFutureListener) future -> {
+        connectToRemote(ctx, 0).addListener((ChannelFutureListener) future -> {
             try {
                 // Get account info and client IP from channel attributes
                 String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
@@ -299,14 +301,14 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         });
     }
 
-    private ChannelFuture connectToRemote(ChannelHandlerContext ctx) {
+    private ChannelFuture connectToRemote(ChannelHandlerContext ctx, int tunnelId) {
         Bootstrap bootstrap = new Bootstrap()
                 .group(ctx.channel().eventLoop())
                 .channelFactory(channelFactory())
                 .option(ChannelOption.SO_RCVBUF, 1048576)
                 .option(ChannelOption.SO_SNDBUF, 1048576)
                 .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                .handler(new DownstreamHandler(ctx.channel()));
+                .handler(new DownstreamHandler(ctx.channel(), tunnelId, newProtocol));
 
         return bootstrap.connect(socketAddress);
     }
@@ -319,10 +321,151 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         }
     }
 
+    private void createNewTunnel(ChannelHandlerContext ctx, String accountName, String clientIp, boolean isFirstTunnel) {
+        int tunnelId = nextTunnelId.getAndIncrement();
+        
+        ChannelFuture connectFuture = connectToRemote(ctx, tunnelId);
+        if (log.isDebugEnabled()) {
+            log.debug("account={}, clientIp={}, wsRemoteAddress={}, tunnelId={}, route={} - initiated UDP tunnel", 
+                    accountName, clientIp, ctx.channel().remoteAddress(), tunnelId, socketAddress);
+        }
+        
+        connectFuture.addListener((ChannelFutureListener) future -> {
+            if (future.isSuccess()) {
+                log.info("account={}, clientIp={}, wsRemoteAddress={}, tunnelId={}, route={} - UDP tunnel connected", 
+                        accountName, clientIp, ctx.channel().remoteAddress(), tunnelId, socketAddress);
+                
+                Channel udpCh = future.channel();
+                UdpTunnel tunnel = new UdpTunnel(tunnelId, udpCh, socketAddress);
+                udpTunnels.put(tunnelId, tunnel);
+                
+                // For the first tunnel, also set the legacy udpChannel reference
+                if (isFirstTunnel) {
+                    udpChannel = udpCh;
+                    
+                    // Send any pending frames
+                    while (!pendingFrames.isEmpty()) {
+                        BinaryWebSocketFrame frame = pendingFrames.poll();
+                        if (frame != null) {
+                            // Prepend tunnel ID to the frame
+                            udpCh.writeAndFlush(new DatagramPacket(frame.content(), socketAddress));
+                            frame.release();
+                        }
+                    }
+                }
+                
+                // Send tunnel ID to client
+                String response = "SOCKET ID: " + tunnelId;
+                ctx.writeAndFlush(new TextWebSocketFrame(response));
+                
+                // Start timeout monitoring if this is the second tunnel (first one has no timeout)
+                if (udpTunnels.size() == 2 && timeoutCheckTask == null) {
+                    startTimeoutMonitoring(ctx, accountName, clientIp);
+                }
+                
+            } else {
+                log.error("account={}, clientIp={}, wsRemoteAddress={}, tunnelId={}, route={} - failed to create UDP tunnel, cause: {}", 
+                        accountName, clientIp, ctx.channel().remoteAddress(), tunnelId, socketAddress, future.cause());
+                if (isFirstTunnel) {
+                    cleanupPendingFrames();
+                    ctx.close();
+                }
+            }
+        });
+    }
+    
+    private void startTimeoutMonitoring(ChannelHandlerContext ctx, String accountName, String clientIp) {
+        timeoutCheckTask = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+            try {
+                long timeoutMillis = UDP_TUNNEL_TIMEOUT_SECONDS * 1000L;
+                udpTunnels.forEach((id, tunnel) -> {
+                    if (tunnel.isIdle(timeoutMillis)) {
+                        log.info("account={}, clientIp={}, wsRemoteAddress={}, tunnelId={} - UDP tunnel timed out after {} seconds of inactivity", 
+                                accountName, clientIp, ctx.channel().remoteAddress(), id, UDP_TUNNEL_TIMEOUT_SECONDS);
+                        closeTunnel(ctx, id, accountName, clientIp);
+                    }
+                });
+            } catch (Exception e) {
+                log.error("Error during timeout check", e);
+            }
+        }, UDP_TUNNEL_TIMEOUT_SECONDS, UDP_TUNNEL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+    
+    private void closeTunnel(ChannelHandlerContext ctx, int tunnelId, String accountName, String clientIp) {
+        UdpTunnel tunnel = udpTunnels.remove(tunnelId);
+        if (tunnel != null) {
+            tunnel.getUdpChannel().close();
+            
+            // Notify client
+            String closeMessage = "CLOSE ID: " + tunnelId;
+            ctx.writeAndFlush(new TextWebSocketFrame(closeMessage));
+            
+            log.info("account={}, clientIp={}, wsRemoteAddress={}, tunnelId={} - UDP tunnel closed", 
+                    accountName, clientIp, ctx.channel().remoteAddress(), tunnelId);
+            
+            // Stop timeout monitoring if only one tunnel remains
+            if (udpTunnels.size() == 1 && timeoutCheckTask != null) {
+                timeoutCheckTask.cancel(false);
+                timeoutCheckTask = null;
+            }
+        }
+    }
+    
+    private void handleLegacyBinaryFrame(BinaryWebSocketFrame binaryWebSocketFrame) {
+        // Old protocol: single tunnel, no ID
+        if (udpChannel == null || !udpChannel.isActive()) {
+            // Queue the frame to be sent once the UDP channel is ready
+            pendingFrames.add(binaryWebSocketFrame.retain());
+        } else {
+            // Retain content since it's being passed to another channel
+            udpChannel.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), socketAddress));
+            // Release the frame after content has been retained and sent
+            binaryWebSocketFrame.release();
+        }
+    }
+    
+    private void handleMultiTunnelBinaryFrame(BinaryWebSocketFrame binaryWebSocketFrame) {
+        // New protocol: first byte is tunnel ID
+        if (binaryWebSocketFrame.content().readableBytes() < 1) {
+            log.warn("Received binary frame with no tunnel ID");
+            binaryWebSocketFrame.release();
+            return;
+        }
+        
+        int tunnelId = binaryWebSocketFrame.content().readByte() & 0xFF;
+        UdpTunnel tunnel = udpTunnels.get(tunnelId);
+        
+        if (tunnel == null) {
+            log.warn("Received data for unknown tunnel ID: {}", tunnelId);
+            binaryWebSocketFrame.release();
+            return;
+        }
+        
+        // Update activity timestamp
+        tunnel.updateActivity();
+        
+        // Send data without the tunnel ID byte
+        Channel udpCh = tunnel.getUdpChannel();
+        if (udpCh.isActive()) {
+            udpCh.writeAndFlush(new DatagramPacket(binaryWebSocketFrame.content().retain(), tunnel.getSocketAddress()));
+        }
+        binaryWebSocketFrame.release();
+    }
+
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         // Clean up any pending frames when the channel becomes inactive
         cleanupPendingFrames();
+        
+        // Close all UDP tunnels
+        if (timeoutCheckTask != null) {
+            timeoutCheckTask.cancel(false);
+            timeoutCheckTask = null;
+        }
+        
+        udpTunnels.values().forEach(tunnel -> tunnel.getUdpChannel().close());
+        udpTunnels.clear();
+        
         super.channelInactive(ctx);
     }
 
