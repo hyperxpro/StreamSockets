@@ -227,4 +227,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     public ChannelFuture authenticationFuture() {
         return authenticationFuture;
     }
+
+    public boolean isUsingNewProtocol() {
+        return useNewProtocol;
+    }
 }

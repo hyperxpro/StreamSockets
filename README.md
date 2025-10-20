@@ -43,6 +43,7 @@ services:
       - ROUTE=127.0.0.1:8888
       - PING_INTERVAL_MILLIS=1000
       - PING_TIMEOUT_MILLIS=10000
+      - UDP_TIMEOUT=300
     ports:
       - "8888:8888/udp"
 ```
@@ -68,6 +69,7 @@ services:
 - `PING_TIMEOUT_MILLIS` - Timeout in milliseconds to wait for a pong message from the server. After 5 consecutive failures, the connection is closed and retried (default: 10000).
 - `RETRY_INITIAL_DELAY_SECONDS` - Initial delay in seconds before the first retry attempt (default: 1).
 - `RETRY_MAX_DELAY_SECONDS` - Maximum delay in seconds between retry attempts (default: 30).
+- `UDP_TIMEOUT` - Timeout in seconds for UDP inactivity. If no UDP packets are received within this period, the WebSocket connection is closed (default: 300).
 
 ### Accounts Configuration
 
