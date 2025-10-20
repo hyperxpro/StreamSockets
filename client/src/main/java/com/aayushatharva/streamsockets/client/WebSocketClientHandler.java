@@ -35,6 +35,8 @@ import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
 
+import java.util.concurrent.ScheduledFuture;
+
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 import static io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE;
@@ -63,6 +65,8 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     private long lastPongTime;
     private int consecutivePingFailures = 0;
+    private ScheduledFuture<?> pingTask;
+    private ScheduledFuture<?> pingTimeoutCheckTask;
 
     WebSocketClientHandler(DatagramHandler datagramHandler, boolean useNewProtocol) {
         this.datagramHandler = datagramHandler;
@@ -91,19 +95,23 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                 // Reset ping failure counter on successful connection
                 consecutivePingFailures = 0;
 
+                // Cancel any existing scheduled tasks
+                cancelScheduledTasks();
+
                 // Send a ping at configurable interval (default 5 seconds)
-                ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                pingTask = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                     ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
                 }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
 
                 lastPongTime = System.currentTimeMillis();
-                ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                pingTimeoutCheckTask = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                     if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
                         consecutivePingFailures++;
                         log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
                         
                         if (consecutivePingFailures >= MAX_PING_FAILURES) {
                             log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
+                            cancelScheduledTasks();
                             ctx.close();
                         }
                     }
@@ -129,19 +137,23 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
                     // Reset ping failure counter on successful connection
                     consecutivePingFailures = 0;
 
+                    // Cancel any existing scheduled tasks
+                    cancelScheduledTasks();
+
                     // Send a ping at configurable interval (default 5 seconds)
-                    ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                    pingTask = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                         ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
                     }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
 
                     lastPongTime = System.currentTimeMillis();
-                    ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                    pingTimeoutCheckTask = ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
                         if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
                             consecutivePingFailures++;
                             log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
                             
                             if (consecutivePingFailures >= MAX_PING_FAILURES) {
                                 log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
+                                cancelScheduledTasks();
                                 ctx.close();
                             }
                         }
@@ -185,6 +197,13 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     }
 
     @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        // Cancel scheduled tasks when channel becomes inactive
+        cancelScheduledTasks();
+        super.channelInactive(ctx);
+    }
+
+    @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         log.error("WebSocketClientHandler exception", cause);
 
@@ -192,7 +211,17 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
             websocketHandshakeFuture.setFailure(cause);
         }
 
+        cancelScheduledTasks();
         ctx.close();
+    }
+
+    private void cancelScheduledTasks() {
+        if (pingTask != null && !pingTask.isCancelled()) {
+            pingTask.cancel(false);
+        }
+        if (pingTimeoutCheckTask != null && !pingTimeoutCheckTask.isCancelled()) {
+            pingTimeoutCheckTask.cancel(false);
+        }
     }
 
     void newUdpConnection() {
