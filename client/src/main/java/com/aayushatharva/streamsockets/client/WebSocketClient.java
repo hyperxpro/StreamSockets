@@ -80,17 +80,6 @@ final class WebSocketClient {
 
         channelFuture.channel().closeFuture().addListener((ChannelFutureListener) future -> {
             log.info("WebSocketClient disconnected from {}", future.channel().remoteAddress());
-            ChannelFuture datagramCloseFuture = datagramHandler.close();
-            if (datagramCloseFuture != null) {
-                datagramCloseFuture.addListener((ChannelFutureListener) datagramFuture -> {
-                    if (datagramFuture.isSuccess()) {
-                        log.info("DatagramHandler closed successfully");
-                    } else {
-                        log.error("DatagramHandler failed to close", datagramFuture.cause());
-                    }
-                    eventLoopGroup.shutdownGracefully();
-                });
-            }
         });
 
         return channelFuture;
