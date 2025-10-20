@@ -34,6 +34,10 @@ import org.jctools.queues.MpscUnboundedArrayQueue;
 import javax.net.ssl.SSLException;
 import java.net.InetSocketAddress;
 import java.util.Queue;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 
 /**
  * This class receives {@link DatagramPacket} from the UDP client and sends them to the WebSocket server.
@@ -41,6 +45,8 @@ import java.util.Queue;
 @Log4j2
 @ChannelHandler.Sharable
 public final class DatagramHandler extends ChannelInboundHandlerAdapter {
+
+    private static final int UDP_TIMEOUT_SECONDS = envValueAsInt("UDP_TIMEOUT", 300);
 
     private final Queue<BinaryWebSocketFrame> queuedFrames = new MpscUnboundedArrayQueue<>(128);
     private final EventLoopGroup eventLoopGroup;
@@ -51,6 +57,8 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     private Channel wsChannel;
     private ChannelFuture webSocketClientFuture;
     private WebSocketClientHandler webSocketClientHandler;
+    private ScheduledFuture<?> udpTimeoutTask;
+    private volatile long lastUdpPacketTime;
 
     DatagramHandler(EventLoopGroup eventLoopGroup) throws SSLException {
         this.eventLoopGroup = eventLoopGroup;
@@ -60,15 +68,30 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof DatagramPacket packet) {
+            // Update last UDP packet time for timeout monitoring
+            lastUdpPacketTime = System.currentTimeMillis();
+            
             // If the socket address is not set, set it to the sender of the packet and the UDP channel to the current channel.
             // This happens when the first packet is received on the UDP channel.
-            // If the sender of the packet is different from the current socket address, tell the WebSocket Server to create a new connection.
+            // If the sender of the packet is different from the current socket address, handle based on protocol.
             // This happens when the client creates new connections to the UDP server.
             if (socketAddress == null) {
                 socketAddress = packet.sender();
                 udpChannel = ctx.channel();
+                scheduleUdpTimeoutCheck();
             } else if (!isInetSocketAddressEquals(socketAddress, packet.sender())) {
-                webSocketClientHandler.newUdpConnection();
+                // For new protocol, create a new WebSocket connection
+                // For old protocol, use the existing connection with new route
+                if (webSocketClientHandler != null && webSocketClientHandler.isUsingNewProtocol()) {
+                    log.info("New UDP socket detected with new protocol, creating new WebSocket connection");
+                    try {
+                        newWebSocketConnection();
+                    } catch (SSLException e) {
+                        log.error("Failed to create new WebSocket connection for new UDP socket", e);
+                    }
+                } else {
+                    webSocketClientHandler.newUdpConnection();
+                }
                 socketAddress = packet.sender();
 
                 // Wait for the WebSocket connection to finish authentication before sending queued frames.
@@ -141,6 +164,11 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
+        // Cancel UDP timeout task if active
+        if (udpTimeoutTask != null && !udpTimeoutTask.isCancelled()) {
+            udpTimeoutTask.cancel(false);
+        }
+        
         // Clean up any queued frames
         while (!queuedFrames.isEmpty()) {
             BinaryWebSocketFrame frame = queuedFrames.poll();
@@ -152,6 +180,24 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
         if (webSocketClientFuture != null) {
             webSocketClientFuture.channel().close();
         }
+    }
+
+    private void scheduleUdpTimeoutCheck() {
+        // Cancel any existing timeout task
+        if (udpTimeoutTask != null && !udpTimeoutTask.isCancelled()) {
+            udpTimeoutTask.cancel(false);
+        }
+
+        // Schedule periodic timeout check every 10 seconds
+        udpTimeoutTask = eventLoopGroup.next().scheduleAtFixedRate(() -> {
+            long timeSinceLastPacket = System.currentTimeMillis() - lastUdpPacketTime;
+            if (timeSinceLastPacket > UDP_TIMEOUT_SECONDS * 1000L) {
+                log.info("No UDP traffic for {} seconds, closing WebSocket connection", UDP_TIMEOUT_SECONDS);
+                if (wsChannel != null && wsChannel.isActive()) {
+                    wsChannel.close();
+                }
+            }
+        }, 10, 10, TimeUnit.SECONDS);
     }
 
     /**
