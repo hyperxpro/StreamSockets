@@ -38,12 +38,12 @@
         <dependency>
             <groupId>com.aayushatharva.streamsockets</groupId>
             <artifactId>common</artifactId>
-            <version>${parent.version}</version>
+            <version>${project.parent.version}</version>
         </dependency>
         <dependency>
             <groupId>com.aayushatharva.streamsockets</groupId>
             <artifactId>authentication-server</artifactId>
-            <version>${parent.version}</version>
+            <version>${project.parent.version}</version>
         </dependency>
     </dependencies>
 

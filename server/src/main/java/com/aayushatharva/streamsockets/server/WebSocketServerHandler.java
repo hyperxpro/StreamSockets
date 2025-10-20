@@ -183,7 +183,11 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 }
             } else {
                 // New protocol: text frames are not expected, ignore or log
-                log.warn("{} received unexpected text frame with new protocol", ctx.channel().remoteAddress());
+                // Get account info and client IP from channel attributes
+                String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
+                String clientIp = ctx.channel().attr(CLIENT_IP_KEY).get();
+                log.warn("account={}, clientIp={}, wsRemoteAddress={} - received unexpected text frame with new protocol", 
+                        accountName, clientIp, ctx.channel().remoteAddress());
                 textWebSocketFrame.release();
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
