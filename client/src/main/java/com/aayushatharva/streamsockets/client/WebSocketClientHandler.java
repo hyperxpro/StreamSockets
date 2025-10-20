@@ -118,50 +118,92 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof TextWebSocketFrame textWebSocketFrame) {
-            try {
-                JsonNode requestJson = OBJECT_MAPPER.readTree(textWebSocketFrame.text());
-
-                // If the server sends a success message, set the authentication future to success
-                if (requestJson.get("success").asBoolean() && requestJson.get("message").asText().equalsIgnoreCase("connected")) {
-                    log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
-                    authenticationFuture.setSuccess();
+            String text = textWebSocketFrame.text();
+            
+            if (useNewProtocol) {
+                // New protocol: handle tunnel ID responses
+                if (text.startsWith("SOCKET ID: ")) {
+                    int tunnelId = Integer.parseInt(text.substring(11));
+                    log.info("Created UDP tunnel with ID: {}", tunnelId);
+                    datagramHandler.onTunnelCreated(tunnelId);
                     
-                    // Reset ping failure counter on successful connection
-                    consecutivePingFailures = 0;
+                    // First tunnel creation completes authentication
+                    if (tunnelId == 1 && !authenticationFuture.isDone()) {
+                        authenticationFuture.setSuccess();
+                        
+                        // Reset ping failure counter on successful connection
+                        consecutivePingFailures = 0;
 
-                    // Send a ping at configurable interval (default 5 seconds)
-                    ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                        ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
-                    }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
+                        // Send a ping at configurable interval (default 5 seconds)
+                        ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                            ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
+                        }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
 
-                    lastPongTime = System.currentTimeMillis();
-                    ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
-                        if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
-                            consecutivePingFailures++;
-                            log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
-                            
-                            if (consecutivePingFailures >= MAX_PING_FAILURES) {
-                                log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
-                                ctx.close();
+                        lastPongTime = System.currentTimeMillis();
+                        ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                            if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
+                                consecutivePingFailures++;
+                                log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
+                                
+                                if (consecutivePingFailures >= MAX_PING_FAILURES) {
+                                    log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
+                                    ctx.close();
+                                }
                             }
-                        }
-                    }, 0, 1000, MILLISECONDS);
+                        }, 0, 1000, MILLISECONDS);
+                    }
+                } else if (text.startsWith("CLOSE ID: ")) {
+                    int tunnelId = Integer.parseInt(text.substring(10));
+                    log.info("Server closed UDP tunnel with ID: {}", tunnelId);
+                    datagramHandler.onTunnelClosed(tunnelId);
                 } else {
-                    log.error("Failed to connect to remote server: {}", requestJson.get("message").asText());
-                    authenticationFuture.setFailure(new Exception(requestJson.get("message").asText()));
+                    log.warn("Received unknown text frame in new protocol: {}", text);
+                }
+            } else {
+                // Old protocol: handle JSON responses
+                try {
+                    JsonNode requestJson = OBJECT_MAPPER.readTree(text);
+
+                    // If the server sends a success message, set the authentication future to success
+                    if (requestJson.get("success").asBoolean() && requestJson.get("message").asText().equalsIgnoreCase("connected")) {
+                        log.info("Connected to remote server: {}", ctx.channel().remoteAddress());
+                        authenticationFuture.setSuccess();
+                        
+                        // Reset ping failure counter on successful connection
+                        consecutivePingFailures = 0;
+
+                        // Send a ping at configurable interval (default 5 seconds)
+                        ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                            ctx.writeAndFlush(new PingWebSocketFrame(PING.duplicate()));
+                        }, 0, PING_INTERVAL_MILLIS, MILLISECONDS);
+
+                        lastPongTime = System.currentTimeMillis();
+                        ctx.channel().eventLoop().scheduleAtFixedRate(() -> {
+                            if (System.currentTimeMillis() - lastPongTime > PING_TIMEOUT_MILLIS) {
+                                consecutivePingFailures++;
+                                log.warn("Ping timeout (failure {} of {})", consecutivePingFailures, MAX_PING_FAILURES);
+                                
+                                if (consecutivePingFailures >= MAX_PING_FAILURES) {
+                                    log.error("Max ping failures reached ({}), closing connection for reconnection...", MAX_PING_FAILURES);
+                                    ctx.close();
+                                }
+                            }
+                        }, 0, 1000, MILLISECONDS);
+                    } else {
+                        log.error("Failed to connect to remote server: {}", requestJson.get("message").asText());
+                        authenticationFuture.setFailure(new Exception(requestJson.get("message").asText()));
+                        ctx.close();
+                    }
+                } catch (Exception e) {
+                    log.error("Failed to parse JSON response", e);
+                    authenticationFuture.setFailure(e);
                     ctx.close();
                 }
-            } catch (Exception e) {
-                log.error("Failed to parse JSON response", e);
-                authenticationFuture.setFailure(e);
-                ctx.close();
-            } finally {
-                textWebSocketFrame.release();
             }
+            textWebSocketFrame.release();
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            // Retain content before passing to datagram handler
-            datagramHandler.writeToUdpClient(binaryWebSocketFrame.content().retain());
-            binaryWebSocketFrame.release();
+            // Pass to datagram handler (it will handle tunnel ID extraction)
+            datagramHandler.handleBinaryFrame(binaryWebSocketFrame);
         } else if (msg instanceof PongWebSocketFrame pongWebSocketFrame) {
             // Release the frame itself (content will be released automatically)
             pongWebSocketFrame.release();
@@ -230,5 +272,12 @@ public final class WebSocketClientHandler extends ChannelInboundHandlerAdapter {
 
     public boolean isUsingNewProtocol() {
         return useNewProtocol;
+    }
+    
+    public void requestNewTunnel() {
+        if (useNewProtocol && ctx != null) {
+            ctx.writeAndFlush(new TextWebSocketFrame("NEW"));
+            log.debug("Requested new UDP tunnel from server");
+        }
     }
 }
