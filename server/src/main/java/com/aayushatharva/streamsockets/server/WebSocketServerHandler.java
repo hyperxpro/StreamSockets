@@ -141,12 +141,14 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                         } else {
                             log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to connect to remote server, cause: {}", 
                                     accountName, clientIp, channel.remoteAddress(), socketAddress, future.cause());
+                            cleanupPendingFrames();
                             ctx.close();
                         }
                     });
                 } catch (Exception e) {
                     log.error("account={}, clientIp={}, wsRemoteAddress={} - invalid route parameters: address={}, port={}", 
                             accountName, clientIp, channel.remoteAddress(), address, portStr, e);
+                    cleanupPendingFrames();
                     ctx.close();
                 }
             }
@@ -286,10 +288,12 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                     responseJson.put("status", "failed");
                     responseJson.put("message", future.cause().getMessage());
 
+                    cleanupPendingFrames();
                     ctx.writeAndFlush(new TextWebSocketFrame(OBJECT_MAPPER.writeValueAsString(responseJson))).addListener(CLOSE);
                 }
             } catch (Exception e) {
                 log.error("Failed to write connection response", e);
+                cleanupPendingFrames();
                 ctx.close();
             }
         });
@@ -318,12 +322,17 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         // Clean up any pending frames when the channel becomes inactive
+        cleanupPendingFrames();
+        super.channelInactive(ctx);
+    }
+
+    private void cleanupPendingFrames() {
+        // Release all pending frames to prevent memory leak
         while (!pendingFrames.isEmpty()) {
             BinaryWebSocketFrame frame = pendingFrames.poll();
             if (frame != null) {
                 frame.release();
             }
         }
-        super.channelInactive(ctx);
     }
 }
