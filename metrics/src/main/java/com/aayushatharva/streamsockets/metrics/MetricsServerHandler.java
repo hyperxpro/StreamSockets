@@ -17,7 +17,8 @@
 
 package com.aayushatharva.streamsockets.metrics;
 
-import io.netty.buffer.Unpooled;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufOutputStream;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
@@ -31,8 +32,8 @@ import io.prometheus.client.exporter.common.TextFormat;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.io.ByteArrayOutputStream;
 import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 
 final class MetricsServerHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
@@ -48,26 +49,27 @@ final class MetricsServerHandler extends SimpleChannelInboundHandler<FullHttpReq
         String uri = request.uri();
 
         if (metricsPath.equals(uri)) {
+            ByteBuf buffer = ctx.alloc().buffer();
             try {
-                ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-                OutputStreamWriter writer = new OutputStreamWriter(outputStream);
+                ByteBufOutputStream outputStream = new ByteBufOutputStream(buffer);
+                OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8);
                 TextFormat.write004(writer, MetricsRegistry.getInstance().getRegistry().metricFamilySamples());
                 writer.flush();
                 writer.close();
 
-                byte[] metricsData = outputStream.toByteArray();
                 FullHttpResponse response = new DefaultFullHttpResponse(
                         HttpVersion.HTTP_1_1,
                         HttpResponseStatus.OK,
-                        Unpooled.wrappedBuffer(metricsData)
+                        buffer
                 );
 
                 response.headers().set(HttpHeaderNames.CONTENT_TYPE, TextFormat.CONTENT_TYPE_004);
-                response.headers().set(HttpHeaderNames.CONTENT_LENGTH, metricsData.length);
+                response.headers().set(HttpHeaderNames.CONTENT_LENGTH, buffer.readableBytes());
 
                 ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
             } catch (Exception e) {
                 logger.error("Failed to generate metrics", e);
+                buffer.release();
                 sendErrorResponse(ctx, HttpResponseStatus.INTERNAL_SERVER_ERROR, "Internal Server Error");
             }
         } else {
@@ -76,13 +78,16 @@ final class MetricsServerHandler extends SimpleChannelInboundHandler<FullHttpReq
     }
 
     private void sendErrorResponse(ChannelHandlerContext ctx, HttpResponseStatus status, String message) {
+        ByteBuf buffer = ctx.alloc().buffer();
+        buffer.writeCharSequence(message, StandardCharsets.UTF_8);
+        
         FullHttpResponse response = new DefaultFullHttpResponse(
                 HttpVersion.HTTP_1_1,
                 status,
-                Unpooled.wrappedBuffer(message.getBytes())
+                buffer
         );
         response.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/plain");
-        response.headers().set(HttpHeaderNames.CONTENT_LENGTH, message.length());
+        response.headers().set(HttpHeaderNames.CONTENT_LENGTH, buffer.readableBytes());
         ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
     }
 
