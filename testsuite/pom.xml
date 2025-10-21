@@ -79,6 +79,13 @@
             <scope>test</scope>
         </dependency>
 
+        <dependency>
+            <groupId>com.aayushatharva.streamsockets</groupId>
+            <artifactId>metrics</artifactId>
+            <version>${project.parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+
         <!-- https://mvnrepository.com/artifact/org.yaml/snakeyaml -->
         <dependency>
             <groupId>org.yaml</groupId>

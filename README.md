@@ -20,10 +20,15 @@ services:
       - BIND_PORT=8080
       - HTTP_MAX_CONTENT_LENGTH=65536
       - WS_PATH=/tunnel
+      - METRICS_ENABLED=true
+      - METRICS_BIND_ADDRESS=0.0.0.0
+      - METRICS_PORT=9090
+      - METRICS_PATH=/metrics
     volumes:
       - ./accounts.yml:/app/accounts.yml
     ports:
       - "8080:8080/tcp"
+      - "9090:9090/tcp"
 ```
 
 #### Client
@@ -59,6 +64,10 @@ services:
 - `BIND_PORT` - Port to bind the server to.
 - `HTTP_MAX_CONTENT_LENGTH` - Maximum content length for HTTP requests, this is used to during the WebSocket handshake.
 - `WS_PATH` - Path to the WebSocket endpoint.
+- `METRICS_ENABLED` - Enable Prometheus metrics (default: true).
+- `METRICS_BIND_ADDRESS` - Address to bind the metrics server to (default: 0.0.0.0).
+- `METRICS_PORT` - Port to bind the metrics server to (default: 9090).
+- `METRICS_PATH` - Path to the metrics endpoint (default: /metrics).
 
 #### Client
 - `THREADS` - Number of threads.
@@ -103,3 +112,25 @@ accounts:
 - `reuse` - Whether to allow reuse of the account concurrently.
 - `routes` - List of routes for the client.
 - `token` - Authentication token for the client. (`openssl rand -hex 32`)
+
+### Prometheus Metrics
+
+The server exposes Prometheus metrics for monitoring and visualization with Grafana. The metrics are available at the configured endpoint (default: `http://localhost:9090/metrics`).
+
+#### Available Metrics
+
+- `streamsockets_active_connections{account_name}` - Number of active WebSocket connections by account
+- `streamsockets_connection_status{account_name}` - Connection status by account (1 = connected, 0 = disconnected)
+- `streamsockets_total_connections{account_name}` - Total number of connections by account (counter)
+- `streamsockets_bytes_received_total{account_name}` - Total bytes received from clients by account (counter)
+- `streamsockets_bytes_sent_total{account_name}` - Total bytes sent to clients by account (counter)
+- `streamsockets_connection_duration_seconds{account_name}` - Histogram of connection durations in seconds by account
+
+#### Grafana Dashboard
+
+You can create a Grafana dashboard to visualize these metrics:
+
+1. **Active Connections Panel**: Graph showing `streamsockets_active_connections` over time
+2. **Connection Status Panel**: Table showing current connection status per account
+3. **Data Transfer Panel**: Graph showing rate of `streamsockets_bytes_received_total` and `streamsockets_bytes_sent_total`
+4. **Connection Duration Panel**: Histogram showing distribution of connection durations
