@@ -28,23 +28,22 @@ import io.netty.channel.epoll.EpollServerSocketChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import lombok.RequiredArgsConstructor;
+import lombok.experimental.FieldDefaults;
+import lombok.extern.log4j.Log4j2;
 
+import static lombok.AccessLevel.PRIVATE;
+
+@Log4j2
+@RequiredArgsConstructor
+@FieldDefaults(level = PRIVATE)
 public final class MetricsServer {
 
-    private static final Logger logger = LogManager.getLogger();
-
-    private final EventLoopGroup parentGroup;
-    private final EventLoopGroup childGroup;
-    private final String metricsPath;
-    private ChannelFuture channelFuture;
-
-    public MetricsServer(EventLoopGroup parentGroup, EventLoopGroup childGroup, String metricsPath) {
-        this.parentGroup = parentGroup;
-        this.childGroup = childGroup;
-        this.metricsPath = metricsPath;
-    }
+    final EventLoopGroup parentGroup;
+    final EventLoopGroup childGroup;
+    final String metricsPath;
+    
+    ChannelFuture channelFuture;
 
     public void start(String bindAddress, int bindPort) {
         ServerBootstrap serverBootstrap = new ServerBootstrap()
@@ -57,9 +56,9 @@ public final class MetricsServer {
         channelFuture = serverBootstrap.bind(bindAddress, bindPort);
         channelFuture.addListener((ChannelFutureListener) future -> {
             if (future.isSuccess()) {
-                logger.info("MetricsServer started on {}", future.channel().localAddress());
+                log.info("MetricsServer started on {}", future.channel().localAddress());
             } else {
-                logger.error("MetricsServer failed to start on {}:{}", bindAddress, bindPort, future.cause());
+                log.error("MetricsServer failed to start on {}:{}", bindAddress, bindPort, future.cause());
             }
         });
     }
@@ -76,6 +75,6 @@ public final class MetricsServer {
         if (channelFuture != null) {
             channelFuture.channel().close().sync();
         }
-        logger.info("MetricsServer stopped");
+        log.info("MetricsServer stopped");
     }
 }

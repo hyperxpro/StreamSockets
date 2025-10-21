@@ -29,20 +29,21 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import io.prometheus.client.exporter.common.TextFormat;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import lombok.RequiredArgsConstructor;
+import lombok.experimental.FieldDefaults;
+import lombok.extern.log4j.Log4j2;
 
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 
+import static lombok.AccessLevel.PRIVATE;
+
+@Log4j2
+@RequiredArgsConstructor
+@FieldDefaults(level = PRIVATE, makeFinal = true)
 final class MetricsServerHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
-    private static final Logger logger = LogManager.getLogger();
-    private final String metricsPath;
-
-    MetricsServerHandler(String metricsPath) {
-        this.metricsPath = metricsPath;
-    }
+    String metricsPath;
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) {
@@ -68,7 +69,7 @@ final class MetricsServerHandler extends SimpleChannelInboundHandler<FullHttpReq
 
                 ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
             } catch (Exception e) {
-                logger.error("Failed to generate metrics", e);
+                log.error("Failed to generate metrics", e);
                 buffer.release();
                 sendErrorResponse(ctx, HttpResponseStatus.INTERNAL_SERVER_ERROR, "Internal Server Error");
             }
@@ -93,7 +94,7 @@ final class MetricsServerHandler extends SimpleChannelInboundHandler<FullHttpReq
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        logger.error("MetricsServerHandler exception", cause);
+        log.error("MetricsServerHandler exception", cause);
         ctx.close();
     }
 }

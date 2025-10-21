@@ -22,14 +22,16 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
+import lombok.RequiredArgsConstructor;
+import lombok.experimental.FieldDefaults;
 
+import static lombok.AccessLevel.PRIVATE;
+
+@RequiredArgsConstructor
+@FieldDefaults(level = PRIVATE, makeFinal = true)
 final class MetricsServerInitializer extends ChannelInitializer<SocketChannel> {
 
-    private final String metricsPath;
-
-    MetricsServerInitializer(String metricsPath) {
-        this.metricsPath = metricsPath;
-    }
+    String metricsPath;
 
     @Override
     protected void initChannel(SocketChannel ch) {
