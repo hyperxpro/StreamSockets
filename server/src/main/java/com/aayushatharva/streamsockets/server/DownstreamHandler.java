@@ -17,16 +17,20 @@
 
 package com.aayushatharva.streamsockets.server;
 
+import com.aayushatharva.streamsockets.metrics.MetricsRegistry;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
+import io.netty.util.AttributeKey;
 import lombok.extern.log4j.Log4j2;
 
 @Log4j2
 final class DownstreamHandler extends ChannelInboundHandlerAdapter {
 
+    private static final AttributeKey<String> ACCOUNT_NAME_KEY = AttributeKey.valueOf("accountName");
+    
     private final Channel channel;
 
     DownstreamHandler(Channel channel) {
@@ -36,6 +40,12 @@ final class DownstreamHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (msg instanceof DatagramPacket packet) {
+            // Track bytes sent to client
+            String accountName = channel.attr(ACCOUNT_NAME_KEY).get();
+            if (accountName != null) {
+                MetricsRegistry.getInstance().recordBytesSent(accountName, packet.content().readableBytes());
+            }
+            
             // Retain content before passing to another channel, and release the packet
             channel.writeAndFlush(new BinaryWebSocketFrame(packet.content().retain()));
             packet.release();

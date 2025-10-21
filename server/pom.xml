@@ -45,6 +45,11 @@
             <artifactId>authentication-server</artifactId>
             <version>${project.parent.version}</version>
         </dependency>
+        <dependency>
+            <groupId>com.aayushatharva.streamsockets</groupId>
+            <artifactId>metrics</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
     </dependencies>
 
         <build>
