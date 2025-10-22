@@ -18,6 +18,7 @@
 package com.aayushatharva.streamsockets.server;
 
 import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
+import com.aayushatharva.streamsockets.metrics.MetricsRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -193,6 +194,12 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 textWebSocketFrame.release();
             }
         } else if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
+            // Track bytes received from client
+            String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
+            if (accountName != null) {
+                MetricsRegistry.getInstance().recordBytesReceived(accountName, binaryWebSocketFrame.content().readableBytes());
+            }
+
             // Check if UDP connection is established before writing
             if (udpChannel == null || !udpChannel.isActive()) {
                 // Queue the frame to be sent once the UDP channel is ready

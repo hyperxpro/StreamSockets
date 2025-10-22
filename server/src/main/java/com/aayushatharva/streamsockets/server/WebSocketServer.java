@@ -44,6 +44,14 @@ public final class WebSocketServer {
     private final EventLoopGroup childGroup = eventLoopGroup(envValueAsInt("CHILD_THREADS", Runtime.getRuntime().availableProcessors()));
     private ChannelFuture channelFuture;
 
+    public EventLoopGroup getParentGroup() {
+        return parentGroup;
+    }
+
+    public EventLoopGroup getChildGroup() {
+        return childGroup;
+    }
+
     public void start() {
         TokenAuthentication tokenAuthentication = new TokenAuthentication(envValue("ACCOUNTS_CONFIG_FILE", "accounts.yaml"));
         start(tokenAuthentication);

@@ -23,7 +23,7 @@
 
     <groupId>com.aayushatharva.streamsockets</groupId>
     <artifactId>parent</artifactId>
-    <version>1.4.0</version>
+    <version>1.5.0</version>
     <packaging>pom</packaging>
 
     <modules>
@@ -32,6 +32,7 @@
         <module>client</module>
         <module>common</module>
         <module>authentication-server</module>
+        <module>metrics</module>
     </modules>
 
     <properties>
@@ -88,6 +89,7 @@
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <version>1.18.42</version>
+            <scope>provided</scope>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/org.jctools/jctools-core -->

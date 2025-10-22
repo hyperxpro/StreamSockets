@@ -23,7 +23,7 @@
     <parent>
         <groupId>com.aayushatharva.streamsockets</groupId>
         <artifactId>parent</artifactId>
-        <version>1.4.0</version>
+        <version>1.5.0</version>
     </parent>
 
     <artifactId>server</artifactId>
@@ -43,6 +43,11 @@
         <dependency>
             <groupId>com.aayushatharva.streamsockets</groupId>
             <artifactId>authentication-server</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.aayushatharva.streamsockets</groupId>
+            <artifactId>metrics</artifactId>
             <version>${project.parent.version}</version>
         </dependency>
     </dependencies>

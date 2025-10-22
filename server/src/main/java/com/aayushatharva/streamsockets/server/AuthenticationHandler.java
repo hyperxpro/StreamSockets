@@ -19,6 +19,7 @@ package com.aayushatharva.streamsockets.server;
 
 import com.aayushatharva.streamsockets.authentication.server.Accounts;
 import com.aayushatharva.streamsockets.authentication.server.TokenAuthentication;
+import com.aayushatharva.streamsockets.metrics.MetricsRegistry;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
@@ -53,6 +54,7 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
     private static final AttributeKey<String> ROUTE_STRING_KEY = AttributeKey.valueOf("routeString");
     private static final AttributeKey<String> ACCOUNT_NAME_KEY = AttributeKey.valueOf("accountName");
     private static final AttributeKey<String> CLIENT_IP_KEY = AttributeKey.valueOf("clientIp");
+    private static final AttributeKey<Long> CONNECTION_START_TIME_KEY = AttributeKey.valueOf("connectionStartTime");
     
     // Use Unpooled.unreleasableBuffer to prevent accidental releases of shared static content
     private static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(
@@ -115,10 +117,22 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
                     return;
                 }
 
+                // Track connection start time and record metrics
+                long connectionStartTime = System.currentTimeMillis();
+                channel.attr(CONNECTION_START_TIME_KEY).set(connectionStartTime);
+                MetricsRegistry.getInstance().recordConnectionStart(account.getName());
+
                 // Release account when the channel is closed
                 channel.closeFuture().addListener((ChannelFutureListener) future -> {
                     if (tokenAuthentication.releaseAccount(account)) {
                         log.info("{} disconnected from the server", account.getName());
+                    }
+                    
+                    // Record connection end and duration
+                    Long startTime = channel.attr(CONNECTION_START_TIME_KEY).get();
+                    if (startTime != null) {
+                        long durationSeconds = (System.currentTimeMillis() - startTime) / 1000;
+                        MetricsRegistry.getInstance().recordConnectionEnd(account.getName(), durationSeconds);
                     }
                 });
 

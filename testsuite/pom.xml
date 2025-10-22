@@ -23,7 +23,7 @@
     <parent>
         <groupId>com.aayushatharva.streamsockets</groupId>
         <artifactId>parent</artifactId>
-        <version>1.4.0</version>
+        <version>1.5.0</version>
     </parent>
 
     <artifactId>testsuite</artifactId>
@@ -75,6 +75,13 @@
         <dependency>
             <groupId>com.aayushatharva.streamsockets</groupId>
             <artifactId>client</artifactId>
+            <version>${project.parent.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.aayushatharva.streamsockets</groupId>
+            <artifactId>metrics</artifactId>
             <version>${project.parent.version}</version>
             <scope>test</scope>
         </dependency>
