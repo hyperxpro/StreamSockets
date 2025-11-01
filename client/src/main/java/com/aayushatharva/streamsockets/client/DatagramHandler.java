@@ -90,7 +90,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                     } catch (SSLException e) {
                         log.error("Failed to create new WebSocket connection for new UDP socket", e);
                     }
-                    // Note: newWebSocketConnection() is async and sets up its own listener at line 228-236
+                    // Note: newWebSocketConnection() is async and sets up its own listener at line 231-239
                     // to send queued frames when the new connection is authenticated, so we don't need to add another listener here
                 } else {
                     webSocketClientHandler.newUdpConnection();
