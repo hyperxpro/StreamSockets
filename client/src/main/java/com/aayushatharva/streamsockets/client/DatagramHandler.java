@@ -84,48 +84,51 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 // For old protocol, use the existing connection with new route
                 if (webSocketClientHandler != null && webSocketClientHandler.isUsingNewProtocol()) {
                     log.info("New UDP socket detected with new protocol, creating new WebSocket connection");
+                    socketAddress = packet.sender();
                     try {
                         newWebSocketConnection();
                     } catch (SSLException e) {
                         log.error("Failed to create new WebSocket connection for new UDP socket", e);
                     }
+                    // Note: newWebSocketConnection() is async and sets up its own listener to send queued frames
+                    // when the new connection is authenticated, so we don't need to add another listener here
                 } else {
                     webSocketClientHandler.newUdpConnection();
-                }
-                socketAddress = packet.sender();
+                    socketAddress = packet.sender();
 
-                // Wait for the WebSocket connection to finish authentication before sending queued frames.
-                webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) future -> {
+                    // Wait for the WebSocket connection to finish authentication before sending queued frames.
+                    webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) future -> {
 
-                    // If the future is successful, send the queued frames.
-                    // if the future is not successful, log the error and retry.
-                    if (future.isSuccess()) {
-                        if (log.isDebugEnabled()) {
-                            log.debug("WebSocket connection authenticated successfully, sending queued frames");
-                        }
-
-                        // Send queued frames
-                        while (!queuedFrames.isEmpty()) {
-                            wsChannel.writeAndFlush(queuedFrames.poll());
-                        }
-                    } else {
-                        log.error("Failed to authenticate WebSocket connection", future.cause());
-                        retryManager.scheduleRetry(() -> {
-                            try {
-                                newWebSocketConnection();
-                            } catch (SSLException e) {
-                                log.error("Failed to create new WebSocket connection during retry", e);
-                                retryManager.scheduleRetry(() -> {
-                                    try {
-                                        newWebSocketConnection();
-                                    } catch (SSLException ex) {
-                                        log.error("Retry failed, giving up", ex);
-                                    }
-                                }, eventLoopGroup.next());
+                        // If the future is successful, send the queued frames.
+                        // if the future is not successful, log the error and retry.
+                        if (future.isSuccess()) {
+                            if (log.isDebugEnabled()) {
+                                log.debug("WebSocket connection authenticated successfully, sending queued frames");
                             }
-                        }, eventLoopGroup.next());
-                    }
-                });
+
+                            // Send queued frames
+                            while (!queuedFrames.isEmpty()) {
+                                wsChannel.writeAndFlush(queuedFrames.poll());
+                            }
+                        } else {
+                            log.error("Failed to authenticate WebSocket connection", future.cause());
+                            retryManager.scheduleRetry(() -> {
+                                try {
+                                    newWebSocketConnection();
+                                } catch (SSLException e) {
+                                    log.error("Failed to create new WebSocket connection during retry", e);
+                                    retryManager.scheduleRetry(() -> {
+                                        try {
+                                            newWebSocketConnection();
+                                        } catch (SSLException ex) {
+                                            log.error("Retry failed, giving up", ex);
+                                        }
+                                    }, eventLoopGroup.next());
+                                }
+                            }, eventLoopGroup.next());
+                        }
+                    });
+                }
             }
 
             BinaryWebSocketFrame binaryWebSocketFrame = new BinaryWebSocketFrame(packet.content().retain());
