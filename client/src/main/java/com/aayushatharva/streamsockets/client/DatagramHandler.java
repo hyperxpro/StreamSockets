@@ -100,7 +100,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                     webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) future -> {
 
                         // If the future is successful, send the queued frames.
-                        // if the future is not successful, log the error and retry.
+                        // If the future is not successful, log the error and retry.
                         if (future.isSuccess()) {
                             if (log.isDebugEnabled()) {
                                 log.debug("WebSocket connection authenticated successfully, sending queued frames");
