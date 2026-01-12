@@ -119,13 +119,12 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                     }
 
                     // Resolve domain name to IP address using Netty's DNS resolver
-                    DNS_RESOLVER_GROUP.getResolver(ctx.executor()).resolve(address).addListener(resolveFuture -> {
+                    DNS_RESOLVER_GROUP.getResolver(ctx.executor()).resolve(InetSocketAddress.createUnresolved(address, port)).addListener(resolveFuture -> {
                         if (resolveFuture.isSuccess()) {
-                            InetAddress resolvedAddress = (InetAddress) resolveFuture.getNow();
-                            socketAddress = new InetSocketAddress(resolvedAddress, port);
+                            socketAddress = (InetSocketAddress) resolveFuture.getNow();
                             
                             log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - resolved {} to {}", 
-                                    accountName, clientIp, channel.remoteAddress(), routeCache, address, resolvedAddress.getHostAddress());
+                                    accountName, clientIp, channel.remoteAddress(), routeCache, address, socketAddress.getAddress().getHostAddress());
 
                             // Connect to remote server immediately
                             ChannelFuture connectFuture = connectToRemote(ctx);
@@ -293,16 +292,15 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         // Resolve domain name to IP address using Netty's DNS resolver
         String finalAddress = address;
         int finalPort = port;
-        DNS_RESOLVER_GROUP.getResolver(ctx.executor()).resolve(address).addListener(resolveFuture -> {
+        DNS_RESOLVER_GROUP.getResolver(ctx.executor()).resolve(InetSocketAddress.createUnresolved(address, port)).addListener(resolveFuture -> {
             if (resolveFuture.isSuccess()) {
-                InetAddress resolvedAddress = (InetAddress) resolveFuture.getNow();
-                socketAddress = new InetSocketAddress(resolvedAddress, finalPort);
+                socketAddress = (InetSocketAddress) resolveFuture.getNow();
                 
                 String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
                 String clientIp = ctx.channel().attr(CLIENT_IP_KEY).get();
                 
                 log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - resolved {} to {} (old protocol)", 
-                        accountName, clientIp, ctx.channel().remoteAddress(), routeCache, finalAddress, resolvedAddress.getHostAddress());
+                        accountName, clientIp, ctx.channel().remoteAddress(), routeCache, finalAddress, socketAddress.getAddress().getHostAddress());
 
                 // Connect to remote server and send response
                 connectToRemote(ctx).addListener((ChannelFutureListener) future -> {
