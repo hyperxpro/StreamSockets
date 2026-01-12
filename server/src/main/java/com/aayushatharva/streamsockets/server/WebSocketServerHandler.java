@@ -45,7 +45,6 @@ import io.netty.util.ReferenceCounted;
 import lombok.extern.log4j.Log4j2;
 import org.jctools.queues.MpscUnboundedArrayQueue;
 
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Queue;
 
