@@ -29,34 +29,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ExitOnFailureTest {
 
     /**
-     * Test that EXIT_ON_FAILURE defaults to false when not set.
+     * Test that EXIT_ON_FAILURE returns a boolean value based on environment variable.
+     * By default (when not set or set to anything other than "true"), it should be false.
      */
     @Test
-    void testExitOnFailureDefaultsFalse() {
-        // Since EXIT_ON_FAILURE is loaded at class initialization in Main,
-        // and we can't easily modify environment variables in tests,
-        // this test verifies the default behavior when the env var is not set
-        // The default should be false based on our implementation
-        boolean exitOnFailure = "true".equalsIgnoreCase(System.getenv("EXIT_ON_FAILURE"));
-        // When not set or set to something other than "true", it should be false
-        if (System.getenv("EXIT_ON_FAILURE") == null || 
-            !System.getenv("EXIT_ON_FAILURE").equalsIgnoreCase("true")) {
-            assertFalse(exitOnFailure);
-        }
-    }
-
-    /**
-     * Test that EXIT_ON_FAILURE is true when environment variable is set to "true".
-     * Note: This test will only pass when the environment variable is actually set.
-     */
-    @Test
-    void testExitOnFailureWhenSetToTrue() {
+    void testExitOnFailureReturnsValue() {
+        // Test that the method returns the expected value based on environment
         String exitOnFailureEnv = System.getenv("EXIT_ON_FAILURE");
-        if (exitOnFailureEnv != null && exitOnFailureEnv.equalsIgnoreCase("true")) {
-            assertTrue(Main.isExitOnFailure());
+        boolean expected = "true".equalsIgnoreCase(exitOnFailureEnv);
+        
+        // Verify the Main.isExitOnFailure() method matches the environment variable
+        boolean actual = Main.isExitOnFailure();
+        
+        if (expected) {
+            assertTrue(actual, "EXIT_ON_FAILURE should be true when env var is set to 'true'");
         } else {
-            // If not set, verify it's false
-            assertFalse(Main.isExitOnFailure());
+            assertFalse(actual, "EXIT_ON_FAILURE should be false when env var is not set or not 'true'");
         }
     }
 }
