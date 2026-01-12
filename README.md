@@ -45,7 +45,7 @@ services:
       - BIND_PORT=8888
       - WEBSOCKET_URI=ws://localhost:8080/tunnel
       - AUTH_TOKEN=secret
-      - ROUTE=127.0.0.1:8888
+      - ROUTE=example.com:8888
       - PING_INTERVAL_MILLIS=1000
       - PING_TIMEOUT_MILLIS=10000
       - UDP_TIMEOUT=300
@@ -73,12 +73,85 @@ services:
 - `THREADS` - Number of threads.
 - `WEBSOCKET_URI` - URI of the WebSocket endpoint. 
 - `AUTH_TOKEN` - Authentication token.
-- `ROUTE` - Route to the endpoint.
+- `ROUTE` - Route to the endpoint. Can be an IP address (e.g., `127.0.0.1:8888`) or a domain name (e.g., `example.com:8888`). The domain will be resolved by the server on each connection.
+- `BIND_ADDRESS` - Address to bind the UDP server to (default: 0.0.0.0).
+- `BIND_PORT` - Port to bind the UDP server to (default: 9000).
 - `PING_INTERVAL_MILLIS` - Interval in milliseconds to send ping messages to the server (default: 5000).
 - `PING_TIMEOUT_MILLIS` - Timeout in milliseconds to wait for a pong message from the server. After 5 consecutive failures, the connection is closed and retried (default: 10000).
 - `RETRY_INITIAL_DELAY_SECONDS` - Initial delay in seconds before the first retry attempt (default: 1).
 - `RETRY_MAX_DELAY_SECONDS` - Maximum delay in seconds between retry attempts (default: 30).
 - `UDP_TIMEOUT` - Timeout in seconds for UDP inactivity. If no UDP packets are received within this period, the WebSocket connection is closed (default: 300).
+- `EXIT_ON_FAILURE` - When set to `true`, the JVM will exit with status code 1 on connection failure or disconnect, allowing systemd to manage restarts. By default, the client will retry connections with exponential backoff (default: false).
+
+### Running Client with systemd
+
+For production deployments, you can run the StreamSockets client as a systemd service. This allows systemd to automatically restart the client on failures.
+
+#### Build the Client JAR
+
+```bash
+mvn clean package -pl client -am
+```
+
+The built JAR will be located at `client/client.jar`.
+
+#### Create systemd Service File
+
+Create a file at `/etc/systemd/system/streamsockets-client.service`:
+
+```ini
+[Unit]
+Description=StreamSockets Client
+After=network.target
+
+[Service]
+Type=simple
+User=streamsockets
+Group=streamsockets
+WorkingDirectory=/opt/streamsockets
+ExecStart=/usr/bin/java -jar /opt/streamsockets/client.jar
+Restart=always
+RestartSec=10
+
+# Environment variables
+Environment="THREADS=4"
+Environment="BIND_ADDRESS=0.0.0.0"
+Environment="BIND_PORT=8888"
+Environment="WEBSOCKET_URI=ws://your-server:8080/tunnel"
+Environment="AUTH_TOKEN=your-secret-token"
+Environment="ROUTE=example.com:8888"
+Environment="EXIT_ON_FAILURE=true"
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### Deploy and Start the Service
+
+```bash
+# Create user and directories
+sudo useradd -r -s /bin/false streamsockets
+sudo mkdir -p /opt/streamsockets
+sudo cp client/client.jar /opt/streamsockets/
+sudo chown -R streamsockets:streamsockets /opt/streamsockets
+
+# Enable and start the service
+sudo systemctl daemon-reload
+sudo systemctl enable streamsockets-client
+sudo systemctl start streamsockets-client
+
+# Check status
+sudo systemctl status streamsockets-client
+
+# View logs
+sudo journalctl -u streamsockets-client -f
+```
+
+When `EXIT_ON_FAILURE=true`, the client will exit immediately on connection failures, and systemd will automatically restart it after the configured `RestartSec` interval.
 
 ### Accounts Configuration
 
@@ -110,7 +183,7 @@ accounts:
 - `name` - Account name.
 - `allowedIps` - List of allowed IP addresses or CIDR ranges for client.
 - `reuse` - Whether to allow reuse of the account concurrently.
-- `routes` - List of routes for the client.
+- `routes` - List of routes for the client. Can be IP addresses or domain names (e.g., `example.com:8888`). Domain names will be resolved by the server on each connection.
 - `token` - Authentication token for the client. (`openssl rand -hex 32`)
 
 ### Prometheus Metrics

@@ -112,20 +112,25 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                             }
                         } else {
                             log.error("Failed to authenticate WebSocket connection", future.cause());
-                            retryManager.scheduleRetry(() -> {
-                                try {
-                                    newWebSocketConnection();
-                                } catch (SSLException e) {
-                                    log.error("Failed to create new WebSocket connection during retry", e);
-                                    retryManager.scheduleRetry(() -> {
-                                        try {
-                                            newWebSocketConnection();
-                                        } catch (SSLException ex) {
-                                            log.error("Retry failed, giving up", ex);
-                                        }
-                                    }, eventLoopGroup.next());
-                                }
-                            }, eventLoopGroup.next());
+                            if (Main.isExitOnFailure()) {
+                                log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
+                                System.exit(1);
+                            } else {
+                                retryManager.scheduleRetry(() -> {
+                                    try {
+                                        newWebSocketConnection();
+                                    } catch (SSLException e) {
+                                        log.error("Failed to create new WebSocket connection during retry", e);
+                                        retryManager.scheduleRetry(() -> {
+                                            try {
+                                                newWebSocketConnection();
+                                            } catch (SSLException ex) {
+                                                log.error("Retry failed, giving up", ex);
+                                            }
+                                        }, eventLoopGroup.next());
+                                    }
+                                }, eventLoopGroup.next());
+                            }
                         }
                     });
                 }
@@ -240,7 +245,27 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
                         // Retry the WebSocket connection if it is closed unexpectedly.
                         wsChannel.closeFuture().addListener(closeFuture -> {
-                            log.warn("WebSocket connection closed, will retry");
+                            log.warn("WebSocket connection closed");
+                            if (Main.isExitOnFailure()) {
+                                log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
+                                System.exit(1);
+                            } else {
+                                log.warn("Will retry connection");
+                                retryManager.scheduleRetry(() -> {
+                                    try {
+                                        newWebSocketConnection();
+                                    } catch (SSLException e) {
+                                        log.error("Failed to create new WebSocket connection during retry", e);
+                                    }
+                                }, eventLoopGroup.next());
+                            }
+                        });
+                    } else {
+                        log.error("Failed to authenticate WebSocket connection", handshakeFuture.cause());
+                        if (Main.isExitOnFailure()) {
+                            log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
+                            System.exit(1);
+                        } else {
                             retryManager.scheduleRetry(() -> {
                                 try {
                                     newWebSocketConnection();
@@ -248,27 +273,23 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                                     log.error("Failed to create new WebSocket connection during retry", e);
                                 }
                             }, eventLoopGroup.next());
-                        });
-                    } else {
-                        log.error("Failed to authenticate WebSocket connection", handshakeFuture.cause());
-                        retryManager.scheduleRetry(() -> {
-                            try {
-                                newWebSocketConnection();
-                            } catch (SSLException e) {
-                                log.error("Failed to create new WebSocket connection during retry", e);
-                            }
-                        }, eventLoopGroup.next());
+                        }
                     }
                 });
             } else {
                 log.error("Failed to connect to WebSocket server", future.cause());
-                retryManager.scheduleRetry(() -> {
-                    try {
-                        newWebSocketConnection();
-                    } catch (SSLException e) {
-                        log.error("Failed to create new WebSocket connection during retry", e);
-                    }
-                }, eventLoopGroup.next());
+                if (Main.isExitOnFailure()) {
+                    log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
+                    System.exit(1);
+                } else {
+                    retryManager.scheduleRetry(() -> {
+                        try {
+                            newWebSocketConnection();
+                        } catch (SSLException e) {
+                            log.error("Failed to create new WebSocket connection during retry", e);
+                        }
+                    }, eventLoopGroup.next());
+                }
             }
         });
     }
