@@ -17,12 +17,27 @@
 
 package com.aayushatharva.streamsockets.client;
 
+import lombok.extern.log4j.Log4j2;
+
 import javax.net.ssl.SSLException;
 
+import static com.aayushatharva.streamsockets.common.Utils.envValue;
+
+@Log4j2
 public final class Main {
 
+    private static final boolean EXIT_ON_FAILURE = "true".equalsIgnoreCase(envValue("EXIT_ON_FAILURE", "false"));
+
     public static void main(String[] args) throws SSLException {
+        if (EXIT_ON_FAILURE) {
+            log.info("EXIT_ON_FAILURE is enabled - JVM will exit on connection failure/disconnect for systemd management");
+        }
+        
         UdpServer udpServer = new UdpServer();
         udpServer.start();
+    }
+    
+    public static boolean isExitOnFailure() {
+        return EXIT_ON_FAILURE;
     }
 }
