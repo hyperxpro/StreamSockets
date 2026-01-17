@@ -28,6 +28,7 @@ import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.nio.NioDatagramChannel;
+import io.netty.channel.uring.IoUring;
 import io.netty.channel.unix.UnixChannelOption;
 import lombok.extern.log4j.Log4j2;
 
@@ -43,12 +44,24 @@ import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 @Log4j2
 public final class UdpServer {
 
+    static {
+        log.info("Epoll available: {}", Epoll.isAvailable());
+        log.info("IoUring available: {}", IoUring.isAvailable());
+        if (Epoll.isAvailable()) {
+            log.info("Using Epoll for high-performance I/O");
+        } else {
+            log.info("Using NIO (consider using Linux with Epoll or io_uring for better performance)");
+        }
+    }
+
     private EventLoopGroup eventLoopGroup;
     private List<ChannelFuture> channelFutures;
     private DatagramHandler datagramHandler;
 
     public void start() throws SSLException {
+        // Determine if we can use SO_REUSEPORT (Epoll supports it)
         int threads = envValueAsInt("THREADS", Epoll.isAvailable() ? Runtime.getRuntime().availableProcessors() * 2 : 1);
+        
         eventLoopGroup = eventLoopGroup(threads);
 
         datagramHandler = new DatagramHandler(eventLoopGroup);

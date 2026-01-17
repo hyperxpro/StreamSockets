@@ -30,6 +30,7 @@ import io.netty.channel.epoll.EpollServerSocketChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.uring.IoUring;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -39,6 +40,16 @@ import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 public final class WebSocketServer {
 
     private static final Logger logger = LogManager.getLogger();
+    
+    static {
+        logger.info("Epoll available: {}", Epoll.isAvailable());
+        logger.info("IoUring available: {}", IoUring.isAvailable());
+        if (Epoll.isAvailable()) {
+            logger.info("Using Epoll for high-performance I/O");
+        } else {
+            logger.info("Using NIO (consider using Linux with Epoll or io_uring for better performance)");
+        }
+    }
 
     private final EventLoopGroup parentGroup = eventLoopGroup(envValueAsInt("PARENT_THREADS", Runtime.getRuntime().availableProcessors()));
     private final EventLoopGroup childGroup = eventLoopGroup(envValueAsInt("CHILD_THREADS", Runtime.getRuntime().availableProcessors()));
@@ -85,6 +96,7 @@ public final class WebSocketServer {
     }
 
     private static EventLoopGroup eventLoopGroup(int threads) {
+        // Use Epoll if available (includes systems with io_uring support)
         if (Epoll.isAvailable()) {
             return new EpollEventLoopGroup(threads);
         } else {
@@ -93,6 +105,7 @@ public final class WebSocketServer {
     }
 
     private static ChannelFactory<ServerSocketChannel> channelFactory() {
+        // Use Epoll if available (includes systems with io_uring support)
         if (Epoll.isAvailable()) {
             return EpollServerSocketChannel::new;
         } else {
