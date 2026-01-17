@@ -51,6 +51,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     private final Queue<BinaryWebSocketFrame> queuedFrames = new MpscUnboundedArrayQueue<>(128);
     private final EventLoopGroup eventLoopGroup;
     private final RetryManager retryManager = new RetryManager();
+    private final Object connectionLock = new Object();
 
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
@@ -59,6 +60,8 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     private WebSocketClientHandler webSocketClientHandler;
     private ScheduledFuture<?> udpTimeoutTask;
     private volatile long lastUdpPacketTime;
+    private volatile boolean isConnecting = false;
+    private volatile boolean isClosedFutureListenerAdded = false;
 
     DatagramHandler(EventLoopGroup eventLoopGroup) throws SSLException {
         this.eventLoopGroup = eventLoopGroup;
@@ -213,6 +216,18 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
      * @throws SSLException if the SSL context cannot be created
      */
     private void newWebSocketConnection() throws SSLException {
+        synchronized (connectionLock) {
+            // Prevent multiple concurrent connection attempts
+            if (isConnecting) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Connection attempt already in progress, skipping duplicate request");
+                }
+                return;
+            }
+            isConnecting = true;
+            isClosedFutureListenerAdded = false;
+        }
+
         // If existing WebSocket channel exists, close it.
         if (wsChannel != null) {
             wsChannel.close();
@@ -238,30 +253,55 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                     // If the authentication future is successful, send the queued frames.
                     // If the authentication future is not successful, log the error and retry.
                     if (handshakeFuture.isSuccess()) {
+                        // Mark connection as no longer in progress
+                        synchronized (connectionLock) {
+                            isConnecting = false;
+                        }
+
                         // Send queued frames
                         while (!queuedFrames.isEmpty()) {
                             wsChannel.writeAndFlush(queuedFrames.poll());
                         }
 
-                        // Retry the WebSocket connection if it is closed unexpectedly.
-                        wsChannel.closeFuture().addListener(closeFuture -> {
-                            log.warn("WebSocket connection closed");
-                            if (Main.isExitOnFailure()) {
-                                log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
-                                System.exit(1);
-                            } else {
-                                log.warn("Will retry connection");
-                                retryManager.scheduleRetry(() -> {
-                                    try {
-                                        newWebSocketConnection();
-                                    } catch (SSLException e) {
-                                        log.error("Failed to create new WebSocket connection during retry", e);
+                        // Add close future listener only once per connection
+                        synchronized (connectionLock) {
+                            if (!isClosedFutureListenerAdded) {
+                                isClosedFutureListenerAdded = true;
+                                
+                                // Retry the WebSocket connection if it is closed unexpectedly.
+                                wsChannel.closeFuture().addListener(closeFuture -> {
+                                    log.warn("WebSocket connection closed");
+                                    
+                                    // Reset the connection state
+                                    synchronized (connectionLock) {
+                                        isConnecting = false;
+                                        isClosedFutureListenerAdded = false;
                                     }
-                                }, eventLoopGroup.next());
+                                    
+                                    if (Main.isExitOnFailure()) {
+                                        log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
+                                        System.exit(1);
+                                    } else {
+                                        log.warn("Will retry connection");
+                                        retryManager.scheduleRetry(() -> {
+                                            try {
+                                                newWebSocketConnection();
+                                            } catch (SSLException e) {
+                                                log.error("Failed to create new WebSocket connection during retry", e);
+                                            }
+                                        }, eventLoopGroup.next());
+                                    }
+                                });
                             }
-                        });
+                        }
                     } else {
                         log.error("Failed to authenticate WebSocket connection", handshakeFuture.cause());
+                        
+                        // Reset connection state before retry
+                        synchronized (connectionLock) {
+                            isConnecting = false;
+                        }
+                        
                         if (Main.isExitOnFailure()) {
                             log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
                             System.exit(1);
@@ -278,6 +318,12 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 });
             } else {
                 log.error("Failed to connect to WebSocket server", future.cause());
+                
+                // Reset connection state before retry
+                synchronized (connectionLock) {
+                    isConnecting = false;
+                }
+                
                 if (Main.isExitOnFailure()) {
                     log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
                     System.exit(1);
