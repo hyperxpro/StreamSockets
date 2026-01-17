@@ -22,13 +22,17 @@ import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.IoHandlerFactory;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollDatagramChannel;
-import io.netty.channel.epoll.EpollEventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.epoll.EpollIoHandler;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.channel.uring.IoUring;
+import io.netty.channel.uring.IoUringDatagramChannel;
+import io.netty.channel.uring.IoUringIoHandler;
 import io.netty.channel.unix.UnixChannelOption;
 import lombok.extern.log4j.Log4j2;
 
@@ -45,12 +49,14 @@ import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 public final class UdpServer {
 
     static {
-        log.info("Epoll available: {}", Epoll.isAvailable());
         log.info("IoUring available: {}", IoUring.isAvailable());
-        if (Epoll.isAvailable()) {
+        log.info("Epoll available: {}", Epoll.isAvailable());
+        if (IoUring.isAvailable()) {
+            log.info("Using IoUring for high-performance I/O");
+        } else if (Epoll.isAvailable()) {
             log.info("Using Epoll for high-performance I/O");
         } else {
-            log.info("Using NIO (consider using Linux with Epoll or io_uring for better performance)");
+            log.info("Using NIO (consider using Linux with io_uring or Epoll for better performance)");
         }
     }
 
@@ -59,8 +65,9 @@ public final class UdpServer {
     private DatagramHandler datagramHandler;
 
     public void start() throws SSLException {
-        // Determine if we can use SO_REUSEPORT (Epoll supports it)
-        int threads = envValueAsInt("THREADS", Epoll.isAvailable() ? Runtime.getRuntime().availableProcessors() * 2 : 1);
+        // Determine if we can use SO_REUSEPORT (IoUring and Epoll support it)
+        boolean canUseReusePort = IoUring.isAvailable() || Epoll.isAvailable();
+        int threads = envValueAsInt("THREADS", canUseReusePort ? Runtime.getRuntime().availableProcessors() * 2 : 1);
         
         eventLoopGroup = eventLoopGroup(threads);
 
@@ -75,7 +82,7 @@ public final class UdpServer {
                 .handler(datagramHandler);
 
         AtomicBoolean reusePort = new AtomicBoolean(false);
-        if (Epoll.isAvailable()) {
+        if (IoUring.isAvailable() || Epoll.isAvailable()) {
             bootstrap.option(UnixChannelOption.SO_REUSEPORT, true);
             reusePort.set(true);
         }
@@ -102,15 +109,27 @@ public final class UdpServer {
     }
 
     private static EventLoopGroup eventLoopGroup(int threads) {
-        if (Epoll.isAvailable()) {
-            return new EpollEventLoopGroup(threads);
+        // Prefer IoUring, fallback to Epoll, then NIO
+        IoHandlerFactory ioHandlerFactory = ioHandlerFactory();
+        return new MultiThreadIoEventLoopGroup(threads, ioHandlerFactory);
+    }
+
+    private static IoHandlerFactory ioHandlerFactory() {
+        // Prefer IoUring, fallback to Epoll, then NIO
+        if (IoUring.isAvailable()) {
+            return IoUringIoHandler.newFactory();
+        } else if (Epoll.isAvailable()) {
+            return EpollIoHandler.newFactory();
         } else {
-            return new NioEventLoopGroup(threads);
+            return NioIoHandler.newFactory();
         }
     }
 
     private static ChannelFactory<DatagramChannel> channelFactory() {
-        if (Epoll.isAvailable()) {
+        // Prefer IoUring, fallback to Epoll, then NIO
+        if (IoUring.isAvailable()) {
+            return IoUringDatagramChannel::new;
+        } else if (Epoll.isAvailable()) {
             return EpollDatagramChannel::new;
         } else {
             return NioDatagramChannel::new;
