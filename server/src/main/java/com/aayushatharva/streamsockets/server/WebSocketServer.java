@@ -24,17 +24,12 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.IoHandlerFactory;
-import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.epoll.Epoll;
-import io.netty.channel.epoll.EpollIoHandler;
+import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.epoll.EpollServerSocketChannel;
-import io.netty.channel.nio.NioIoHandler;
+import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.channel.uring.IoUring;
-import io.netty.channel.uring.IoUringIoHandler;
-import io.netty.channel.uring.IoUringServerSocketChannel;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -46,14 +41,11 @@ public final class WebSocketServer {
     private static final Logger logger = LogManager.getLogger();
     
     static {
-        logger.info("IoUring available: {}", IoUring.isAvailable());
         logger.info("Epoll available: {}", Epoll.isAvailable());
-        if (IoUring.isAvailable()) {
-            logger.info("Using IoUring for high-performance I/O");
-        } else if (Epoll.isAvailable()) {
+        if (Epoll.isAvailable()) {
             logger.info("Using Epoll for high-performance I/O");
         } else {
-            logger.info("Using NIO (consider using Linux with io_uring or Epoll for better performance)");
+            logger.info("Using NIO (consider using Linux with Epoll for better performance)");
         }
     }
 
@@ -102,27 +94,15 @@ public final class WebSocketServer {
     }
 
     private static EventLoopGroup eventLoopGroup(int threads) {
-        // Prefer IoUring, fallback to Epoll, then NIO
-        IoHandlerFactory ioHandlerFactory = ioHandlerFactory();
-        return new MultiThreadIoEventLoopGroup(threads, ioHandlerFactory);
-    }
-
-    private static IoHandlerFactory ioHandlerFactory() {
-        // Prefer IoUring, fallback to Epoll, then NIO
-        if (IoUring.isAvailable()) {
-            return IoUringIoHandler.newFactory();
-        } else if (Epoll.isAvailable()) {
-            return EpollIoHandler.newFactory();
+        if (Epoll.isAvailable()) {
+            return new EpollEventLoopGroup(threads);
         } else {
-            return NioIoHandler.newFactory();
+            return new NioEventLoopGroup(threads);
         }
     }
 
     private static ChannelFactory<ServerSocketChannel> channelFactory() {
-        // Prefer IoUring, fallback to Epoll, then NIO
-        if (IoUring.isAvailable()) {
-            return IoUringServerSocketChannel::new;
-        } else if (Epoll.isAvailable()) {
+        if (Epoll.isAvailable()) {
             return EpollServerSocketChannel::new;
         } else {
             return NioServerSocketChannel::new;

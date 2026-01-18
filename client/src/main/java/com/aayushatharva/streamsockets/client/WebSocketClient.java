@@ -27,8 +27,6 @@ import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.channel.uring.IoUring;
-import io.netty.channel.uring.IoUringSocketChannel;
 import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
@@ -88,10 +86,8 @@ final class WebSocketClient {
     }
 
     private static ChannelFactory<SocketChannel> channelFactory() {
-        // Prefer IoUring, fallback to Epoll, then NIO
-        if (IoUring.isAvailable()) {
-            return IoUringSocketChannel::new;
-        } else if (Epoll.isAvailable()) {
+        // Use channel types compatible with the EventLoopGroup (Epoll or NIO)
+        if (Epoll.isAvailable()) {
             return EpollSocketChannel::new;
         } else {
             return NioSocketChannel::new;
