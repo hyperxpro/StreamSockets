@@ -24,18 +24,17 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.util.AttributeKey;
+import io.netty.util.ReferenceCounted;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 
 @Log4j2
+@RequiredArgsConstructor
 final class DownstreamHandler extends ChannelInboundHandlerAdapter {
 
     private static final AttributeKey<String> ACCOUNT_NAME_KEY = AttributeKey.valueOf("accountName");
     
     private final Channel channel;
-
-    DownstreamHandler(Channel channel) {
-        this.channel = channel;
-    }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
@@ -53,7 +52,7 @@ final class DownstreamHandler extends ChannelInboundHandlerAdapter {
             log.error("Unknown frame type: {}", msg.getClass().getName());
             
             // Release the message if it is a reference counted object
-            if (msg instanceof io.netty.util.ReferenceCounted referenceCounted) {
+            if (msg instanceof ReferenceCounted referenceCounted) {
                 referenceCounted.release();
             }
         }
