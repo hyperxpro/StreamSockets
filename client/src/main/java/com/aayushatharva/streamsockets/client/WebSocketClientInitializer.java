@@ -28,6 +28,7 @@ import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakerFactory;
 import io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
+import lombok.RequiredArgsConstructor;
 
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLParameters;
@@ -36,6 +37,7 @@ import java.net.URI;
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static io.netty.handler.codec.http.websocketx.WebSocketVersion.V13;
 
+@RequiredArgsConstructor
 final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel> {
 
     private static final String AUTH_TOKEN = envValue("AUTH_TOKEN", "");
@@ -45,12 +47,6 @@ final class WebSocketClientInitializer extends ChannelInitializer<SocketChannel>
     private final DatagramHandler datagramHandler;
     private final URI uri;
     private final SslContext sslContext;
-
-    WebSocketClientInitializer(DatagramHandler datagramHandler, URI uri, SslContext sslContext) {
-        this.datagramHandler = datagramHandler;
-        this.uri = uri;
-        this.sslContext = sslContext;
-    }
 
     @Override
     protected void initChannel(SocketChannel channel) {

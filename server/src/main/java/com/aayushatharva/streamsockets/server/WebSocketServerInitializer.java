@@ -25,17 +25,15 @@ import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.WebSocketDecoderConfig;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolConfig;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
+import lombok.RequiredArgsConstructor;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 
+@RequiredArgsConstructor
 final class WebSocketServerInitializer extends ChannelInitializer<SocketChannel> {
 
     private final TokenAuthentication tokenAuthentication;
-
-    WebSocketServerInitializer(TokenAuthentication tokenAuthentication) {
-        this.tokenAuthentication = tokenAuthentication;
-    }
 
     @Override
     protected void initChannel(SocketChannel channel) {

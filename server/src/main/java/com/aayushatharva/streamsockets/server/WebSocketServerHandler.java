@@ -36,6 +36,8 @@ import io.netty.channel.epoll.EpollDatagramChannel;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.nio.NioDatagramChannel;
+import io.netty.channel.uring.IoUring;
+import io.netty.channel.uring.IoUringDatagramChannel;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.resolver.dns.DnsAddressResolverGroup;
@@ -55,13 +57,13 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
 
     // Reuse ObjectMapper instance for better performance (thread-safe)
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    
+
     // DNS resolver for resolving domain names to IP addresses
     private static final DnsAddressResolverGroup DNS_RESOLVER_GROUP = new DnsAddressResolverGroup(
             channelFactory(),
             DnsServerAddressStreamProviders.platformDefault()
     );
-    
+
     // AttributeKeys for reading protocol information
     private static final AttributeKey<Boolean> NEW_PROTOCOL_KEY = AttributeKey.valueOf("newProtocol");
     private static final AttributeKey<String> ROUTE_ADDRESS_KEY = AttributeKey.valueOf("routeAddress");
@@ -69,7 +71,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     private static final AttributeKey<String> ROUTE_STRING_KEY = AttributeKey.valueOf("routeString");
     private static final AttributeKey<String> ACCOUNT_NAME_KEY = AttributeKey.valueOf("accountName");
     private static final AttributeKey<String> CLIENT_IP_KEY = AttributeKey.valueOf("clientIp");
-    
+
     private final TokenAuthentication tokenAuthentication;
     private final Queue<BinaryWebSocketFrame> pendingFrames = new MpscUnboundedArrayQueue<>(128);
     private InetSocketAddress socketAddress;
@@ -88,30 +90,30 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         if (evt instanceof io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler.HandshakeComplete) {
             // Cache channel reference to avoid repeated ctx.channel() calls
             Channel channel = ctx.channel();
-            
+
             // Check for new protocol from channel attributes
             Boolean newProtocolAttr = channel.attr(NEW_PROTOCOL_KEY).get();
             if (newProtocolAttr != null && newProtocolAttr) {
                 newProtocol = true;
-                
+
                 // Get account info and client IP from channel attributes
                 String accountName = channel.attr(ACCOUNT_NAME_KEY).get();
                 String clientIp = channel.attr(CLIENT_IP_KEY).get();
-                
-                log.info("account={}, clientIp={}, wsRemoteAddress={} - WebSocket handshake complete with new protocol", 
+
+                log.info("account={}, clientIp={}, wsRemoteAddress={} - WebSocket handshake complete with new protocol",
                         accountName, clientIp, channel.remoteAddress());
-                
+
                 // Get pre-built route string from channel attributes (no string concatenation needed)
                 routeCache = channel.attr(ROUTE_STRING_KEY).get();
                 String address = channel.attr(ROUTE_ADDRESS_KEY).get();
                 String portStr = channel.attr(ROUTE_PORT_KEY).get();
-                
+
                 try {
                     int port = Integer.parseInt(portStr);
-                    
+
                     // Check if the route is allowed (using cached route string)
                     if (!tokenAuthentication.containsRoute(routeCache)) {
-                        log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - attempted to connect to unauthorized route", 
+                        log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - attempted to connect to unauthorized route",
                                 accountName, clientIp, channel.remoteAddress(), routeCache);
                         ctx.close();
                         return;
@@ -121,21 +123,21 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                     DNS_RESOLVER_GROUP.getResolver(ctx.executor()).resolve(InetSocketAddress.createUnresolved(address, port)).addListener(resolveFuture -> {
                         if (resolveFuture.isSuccess()) {
                             socketAddress = (InetSocketAddress) resolveFuture.getNow();
-                            
-                            log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - resolved {} to {}", 
+
+                            log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - resolved {} to {}",
                                     accountName, clientIp, channel.remoteAddress(), routeCache, address, socketAddress.getAddress().getHostAddress());
 
                             // Connect to remote server immediately
                             ChannelFuture connectFuture = connectToRemote(ctx);
                             if (log.isDebugEnabled()) {
-                                log.debug("account={}, clientIp={}, wsRemoteAddress={}, route={} - initiated UDP connection (new protocol)", 
+                                log.debug("account={}, clientIp={}, wsRemoteAddress={}, route={} - initiated UDP connection (new protocol)",
                                         accountName, clientIp, channel.remoteAddress(), socketAddress);
                             }
-                            
+
                             // Always use listener to ensure udpChannel is set correctly
                             connectFuture.addListener((ChannelFutureListener) future -> {
                                 if (future.isSuccess()) {
-                                    log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - connected to remote server", 
+                                    log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - connected to remote server",
                                             accountName, clientIp, channel.remoteAddress(), socketAddress);
                                     udpChannel = future.channel();
 
@@ -150,26 +152,26 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
 
                                     // If the WebSocket connection is closed, close the UDP channel
                                     channel.closeFuture().addListener((ChannelFutureListener) future1 -> {
-                                        log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - disconnected from remote server", 
+                                        log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - disconnected from remote server",
                                                 accountName, clientIp, channel.remoteAddress(), socketAddress);
                                         udpChannel.close();
                                     });
                                 } else {
-                                    log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to connect to remote server, cause: {}", 
+                                    log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to connect to remote server, cause: {}",
                                             accountName, clientIp, channel.remoteAddress(), socketAddress, future.cause());
                                     cleanupPendingFrames();
                                     ctx.close();
                                 }
                             });
                         } else {
-                            log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to resolve domain name: {}", 
+                            log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to resolve domain name: {}",
                                     accountName, clientIp, channel.remoteAddress(), routeCache, resolveFuture.cause().getMessage());
                             cleanupPendingFrames();
                             ctx.close();
                         }
                     });
                 } catch (Exception e) {
-                    log.error("account={}, clientIp={}, wsRemoteAddress={} - invalid route parameters: address={}, port={}", 
+                    log.error("account={}, clientIp={}, wsRemoteAddress={} - invalid route parameters: address={}, port={}",
                             accountName, clientIp, channel.remoteAddress(), address, portStr, e);
                     cleanupPendingFrames();
                     ctx.close();
@@ -211,7 +213,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                 // Get account info and client IP from channel attributes
                 String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
                 String clientIp = ctx.channel().attr(CLIENT_IP_KEY).get();
-                log.warn("account={}, clientIp={}, wsRemoteAddress={} - received unexpected text frame with new protocol", 
+                log.warn("account={}, clientIp={}, wsRemoteAddress={} - received unexpected text frame with new protocol",
                         accountName, clientIp, ctx.channel().remoteAddress());
                 textWebSocketFrame.release();
             }
@@ -289,16 +291,15 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
         }
 
         // Resolve domain name to IP address using Netty's DNS resolver
-        String finalAddress = address;
-        int finalPort = port;
+        final String finalAddress = address;
         DNS_RESOLVER_GROUP.getResolver(ctx.executor()).resolve(InetSocketAddress.createUnresolved(address, port)).addListener(resolveFuture -> {
             if (resolveFuture.isSuccess()) {
                 socketAddress = (InetSocketAddress) resolveFuture.getNow();
-                
+
                 String accountName = ctx.channel().attr(ACCOUNT_NAME_KEY).get();
                 String clientIp = ctx.channel().attr(CLIENT_IP_KEY).get();
-                
-                log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - resolved {} to {} (old protocol)", 
+
+                log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - resolved {} to {} (old protocol)",
                         accountName, clientIp, ctx.channel().remoteAddress(), routeCache, finalAddress, socketAddress.getAddress().getHostAddress());
 
                 // Connect to remote server and send response
@@ -306,7 +307,7 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
                     try {
                         ObjectNode responseJson = OBJECT_MAPPER.createObjectNode();
                         if (future.isSuccess()) {
-                            log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - connected to remote server (old protocol)", 
+                            log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - connected to remote server (old protocol)",
                                     accountName, clientIp, ctx.channel().remoteAddress(), socketAddress);
 
                             udpChannel = future.channel();
@@ -316,12 +317,12 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
 
                             // If the WebSocket connection is closed, close the UDP channel
                             ctx.channel().closeFuture().addListener((ChannelFutureListener) future1 -> {
-                                log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - disconnected from remote server (old protocol)", 
+                                log.info("account={}, clientIp={}, wsRemoteAddress={}, route={} - disconnected from remote server (old protocol)",
                                         accountName, clientIp, ctx.channel().remoteAddress(), socketAddress);
                                 udpChannel.close();
                             });
                         } else {
-                            log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to connect to remote server (old protocol)", 
+                            log.error("account={}, clientIp={}, wsRemoteAddress={}, route={} - failed to connect to remote server (old protocol)",
                                     accountName, clientIp, ctx.channel().remoteAddress(), socketAddress);
 
                             responseJson.put("status", "failed");
@@ -365,7 +366,9 @@ final class WebSocketServerHandler extends ChannelInboundHandlerAdapter {
     }
 
     private static ChannelFactory<DatagramChannel> channelFactory() {
-        if (Epoll.isAvailable()) {
+        if (IoUring.isAvailable()) {
+            return IoUringDatagramChannel::new;
+        } else if (Epoll.isAvailable()) {
             return EpollDatagramChannel::new;
         } else {
             return NioDatagramChannel::new;

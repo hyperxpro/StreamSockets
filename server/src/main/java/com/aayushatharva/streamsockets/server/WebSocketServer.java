@@ -24,42 +24,49 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.IoHandlerFactory;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.epoll.Epoll;
-import io.netty.channel.epoll.EpollEventLoopGroup;
+import io.netty.channel.epoll.EpollIoHandler;
 import io.netty.channel.epoll.EpollServerSocketChannel;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.uring.IoUring;
+import io.netty.channel.uring.IoUringIoHandler;
+import io.netty.channel.uring.IoUringServerSocketChannel;
+import lombok.Getter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
+import static io.netty.buffer.PooledByteBufAllocator.*;
 
 public final class WebSocketServer {
 
     private static final Logger logger = LogManager.getLogger();
-    
+
     static {
         logger.info("Epoll available: {}", Epoll.isAvailable());
-        if (Epoll.isAvailable()) {
+        logger.info("IoUring available: {}", IoUring.isAvailable());
+
+        if (IoUring.isAvailable()) {
+            logger.info("Using IOUring for high-performance I/O");
+        } else if (Epoll.isAvailable()) {
             logger.info("Using Epoll for high-performance I/O");
         } else {
             logger.info("Using NIO (consider using Linux with Epoll for better performance)");
         }
     }
 
+    @Getter
     private final EventLoopGroup parentGroup = eventLoopGroup(envValueAsInt("PARENT_THREADS", Runtime.getRuntime().availableProcessors()));
+
+    @Getter
     private final EventLoopGroup childGroup = eventLoopGroup(envValueAsInt("CHILD_THREADS", Runtime.getRuntime().availableProcessors()));
     private ChannelFuture channelFuture;
-
-    public EventLoopGroup getParentGroup() {
-        return parentGroup;
-    }
-
-    public EventLoopGroup getChildGroup() {
-        return childGroup;
-    }
 
     public void start() {
         TokenAuthentication tokenAuthentication = new TokenAuthentication(envValue("ACCOUNTS_CONFIG_FILE", "accounts.yaml"));
@@ -77,8 +84,8 @@ public final class WebSocketServer {
                 .childOption(ChannelOption.SO_KEEPALIVE, true)
                 .childOption(ChannelOption.SO_RCVBUF, 65536)
                 .childOption(ChannelOption.SO_SNDBUF, 65536)
-                .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new io.netty.channel.WriteBufferWaterMark(32 * 1024, 64 * 1024))
-                .childOption(ChannelOption.ALLOCATOR, io.netty.buffer.PooledByteBufAllocator.DEFAULT);
+                .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(32 * 1024, 64 * 1024))
+                .childOption(ChannelOption.ALLOCATOR, DEFAULT);
 
         String bindAddress = envValue("BIND_ADDRESS", "0.0.0.0");
         int bindPort = envValueAsInt("BIND_PORT", 8080);
@@ -94,15 +101,23 @@ public final class WebSocketServer {
     }
 
     private static EventLoopGroup eventLoopGroup(int threads) {
-        if (Epoll.isAvailable()) {
-            return new EpollEventLoopGroup(threads);
+        IoHandlerFactory ioHandlerFactory;
+
+        if (IoUring.isAvailable()) {
+            ioHandlerFactory = IoUringIoHandler.newFactory();
+        } else if (Epoll.isAvailable()) {
+            ioHandlerFactory = EpollIoHandler.newFactory();
         } else {
-            return new NioEventLoopGroup(threads);
+            ioHandlerFactory = NioIoHandler.newFactory();
         }
+
+        return new MultiThreadIoEventLoopGroup(threads, ioHandlerFactory);
     }
 
     private static ChannelFactory<ServerSocketChannel> channelFactory() {
-        if (Epoll.isAvailable()) {
+        if (IoUring.isAvailable()) {
+            return IoUringServerSocketChannel::new;
+        } else if (Epoll.isAvailable()) {
             return EpollServerSocketChannel::new;
         } else {
             return NioServerSocketChannel::new;

@@ -29,10 +29,13 @@ import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.util.AttributeKey;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 
 import java.net.InetSocketAddress;
 
+import static io.netty.buffer.Unpooled.unreleasableBuffer;
+import static io.netty.buffer.Unpooled.wrappedBuffer;
 import static io.netty.channel.ChannelFutureListener.CLOSE;
 import static io.netty.handler.codec.http.HttpResponseStatus.BAD_REQUEST;
 import static io.netty.handler.codec.http.HttpResponseStatus.FORBIDDEN;
@@ -40,6 +43,7 @@ import static io.netty.handler.codec.http.HttpResponseStatus.UNAUTHORIZED;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
 @Log4j2
+@RequiredArgsConstructor
 final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
 
     private final TokenAuthentication tokenAuthentication;
@@ -57,16 +61,9 @@ final class AuthenticationHandler extends ChannelInboundHandlerAdapter {
     private static final AttributeKey<Long> CONNECTION_START_TIME_KEY = AttributeKey.valueOf("connectionStartTime");
     
     // Use Unpooled.unreleasableBuffer to prevent accidental releases of shared static content
-    private static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(
-            HTTP_1_1, UNAUTHORIZED, Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("Unauthorized".getBytes())));
-    private static final FullHttpResponse FORBIDDEN_RESPONSE = new DefaultFullHttpResponse(
-            HTTP_1_1, FORBIDDEN, Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("Failed to lease account".getBytes())));
-    private static final FullHttpResponse BAD_REQUEST_RESPONSE = new DefaultFullHttpResponse(
-            HTTP_1_1, BAD_REQUEST, Unpooled.unreleasableBuffer(Unpooled.wrappedBuffer("Invalid authentication type".getBytes())));
-
-    AuthenticationHandler(TokenAuthentication tokenAuthentication) {
-        this.tokenAuthentication = tokenAuthentication;
-    }
+    private static final FullHttpResponse UNAUTHORIZED_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, UNAUTHORIZED, unreleasableBuffer(wrappedBuffer("Unauthorized".getBytes())));
+    private static final FullHttpResponse FORBIDDEN_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, FORBIDDEN, unreleasableBuffer(wrappedBuffer("Failed to lease account".getBytes())));
+    private static final FullHttpResponse BAD_REQUEST_RESPONSE = new DefaultFullHttpResponse(HTTP_1_1, BAD_REQUEST, unreleasableBuffer(wrappedBuffer("Invalid authentication type".getBytes())));
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {

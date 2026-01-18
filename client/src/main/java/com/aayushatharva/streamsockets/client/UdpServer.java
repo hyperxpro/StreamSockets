@@ -18,15 +18,27 @@
 package com.aayushatharva.streamsockets.client;
 
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.IoHandlerFactory;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollDatagramChannel;
+import io.netty.channel.epoll.EpollIoHandler;
+import io.netty.channel.epoll.EpollServerSocketChannel;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.nio.NioDatagramChannel;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.unix.UnixChannelOption;
+import io.netty.channel.uring.IoUring;
+import io.netty.channel.uring.IoUringDatagramChannel;
+import io.netty.channel.uring.IoUringIoHandler;
+import io.netty.channel.uring.IoUringServerSocketChannel;
 import lombok.extern.log4j.Log4j2;
 
 import javax.net.ssl.SSLException;
@@ -43,7 +55,11 @@ public final class UdpServer {
 
     static {
         log.info("Epoll available: {}", Epoll.isAvailable());
-        if (Epoll.isAvailable()) {
+        log.info("IoUring available: {}", false);
+
+        if (IoUring.isAvailable()) {
+            log.info("Using IOUring for high-performance I/O");
+        } else if (Epoll.isAvailable()) {
             log.info("Using Epoll for high-performance I/O");
         } else {
             log.info("Using NIO (consider using Linux with Epoll for better performance)");
@@ -55,24 +71,23 @@ public final class UdpServer {
     private DatagramHandler datagramHandler;
 
     public void start() throws SSLException {
-        // Determine if we can use SO_REUSEPORT (Epoll supports it)
-        boolean canUseReusePort = Epoll.isAvailable();
+        // Determine if we can use SO_REUSEPORT (IoUring or Epoll supports it)
+        boolean canUseReusePort = IoUring.isAvailable() || Epoll.isAvailable();
         int threads = envValueAsInt("THREADS", canUseReusePort ? Runtime.getRuntime().availableProcessors() * 2 : 1);
         
         eventLoopGroup = eventLoopGroup(threads);
-
         datagramHandler = new DatagramHandler(eventLoopGroup);
 
         Bootstrap bootstrap = new Bootstrap()
                 .group(eventLoopGroup)
                 .channelFactory(channelFactory())
-                .option(io.netty.channel.ChannelOption.SO_RCVBUF, 1048576)
-                .option(io.netty.channel.ChannelOption.SO_SNDBUF, 1048576)
-                .option(io.netty.channel.ChannelOption.ALLOCATOR, io.netty.buffer.PooledByteBufAllocator.DEFAULT)
+                .option(ChannelOption.SO_RCVBUF, 1048576)
+                .option(ChannelOption.SO_SNDBUF, 1048576)
+                .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                 .handler(datagramHandler);
 
         AtomicBoolean reusePort = new AtomicBoolean(false);
-        if (Epoll.isAvailable()) {
+        if (IoUring.isAvailable() || Epoll.isAvailable()) {
             bootstrap.option(UnixChannelOption.SO_REUSEPORT, true);
             reusePort.set(true);
         }
@@ -99,21 +114,23 @@ public final class UdpServer {
     }
 
     private static EventLoopGroup eventLoopGroup(int threads) {
-        // Note: Using traditional EventLoopGroup instead of MultiThreadIoEventLoopGroup
-        // because this EventLoopGroup is shared between UDP server and WebSocket client.
-        // In Netty 4.2.x, IoHandler-based EventLoopGroups work best when all channels
-        // using that group are of the same type. Since we mix DatagramChannel and SocketChannel,
-        // we use traditional EventLoopGroups which support IoUring/Epoll/NIO transparently.
-        if (Epoll.isAvailable()) {
-            return new io.netty.channel.epoll.EpollEventLoopGroup(threads);
+        IoHandlerFactory ioHandlerFactory;
+
+        if (IoUring.isAvailable()) {
+            ioHandlerFactory = IoUringIoHandler.newFactory();
+        } else if (Epoll.isAvailable()) {
+            ioHandlerFactory = EpollIoHandler.newFactory();
         } else {
-            return new io.netty.channel.nio.NioEventLoopGroup(threads);
+            ioHandlerFactory = NioIoHandler.newFactory();
         }
+
+        return new MultiThreadIoEventLoopGroup(threads, ioHandlerFactory);
     }
 
     private static ChannelFactory<DatagramChannel> channelFactory() {
-        // Use channel types compatible with the EventLoopGroup
-        if (Epoll.isAvailable()) {
+        if (IoUring.isAvailable()) {
+            return IoUringDatagramChannel::new;
+        } else if (Epoll.isAvailable()) {
             return EpollDatagramChannel::new;
         } else {
             return NioDatagramChannel::new;

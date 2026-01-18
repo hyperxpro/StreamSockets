@@ -23,10 +23,13 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.channel.uring.IoUring;
+import io.netty.channel.uring.IoUringSocketChannel;
 import io.netty.handler.ssl.OpenSsl;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
@@ -37,6 +40,7 @@ import javax.net.ssl.SSLException;
 import java.net.URI;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
+import static io.netty.buffer.PooledByteBufAllocator.DEFAULT;
 
 @Log4j2
 final class WebSocketClient {
@@ -63,8 +67,8 @@ final class WebSocketClient {
                 .option(ChannelOption.SO_KEEPALIVE, true)
                 .option(ChannelOption.SO_RCVBUF, 65536)
                 .option(ChannelOption.SO_SNDBUF, 65536)
-                .option(ChannelOption.WRITE_BUFFER_WATER_MARK, new io.netty.channel.WriteBufferWaterMark(32 * 1024, 64 * 1024))
-                .option(ChannelOption.ALLOCATOR, io.netty.buffer.PooledByteBufAllocator.DEFAULT)
+                .option(ChannelOption.WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(32 * 1024, 64 * 1024))
+                .option(ChannelOption.ALLOCATOR, DEFAULT)
                 .handler(new WebSocketClientInitializer(datagramHandler, uri, sslContext));
 
         log.info("Connecting to WebSocketServer at {}:{}", uri.getHost(), uri.getPort());
@@ -86,8 +90,9 @@ final class WebSocketClient {
     }
 
     private static ChannelFactory<SocketChannel> channelFactory() {
-        // Use channel types compatible with the EventLoopGroup (Epoll or NIO)
-        if (Epoll.isAvailable()) {
+        if (IoUring.isAvailable()) {
+            return IoUringSocketChannel::new;
+        } else if (Epoll.isAvailable()) {
             return EpollSocketChannel::new;
         } else {
             return NioSocketChannel::new;
