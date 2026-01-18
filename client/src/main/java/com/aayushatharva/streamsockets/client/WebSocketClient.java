@@ -86,6 +86,7 @@ final class WebSocketClient {
     }
 
     private static ChannelFactory<SocketChannel> channelFactory() {
+        // Use channel types compatible with the EventLoopGroup (Epoll or NIO)
         if (Epoll.isAvailable()) {
             return EpollSocketChannel::new;
         } else {

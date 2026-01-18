@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.5.0)'
+        required: true
+        type: string
+
+jobs:
+  build-and-upload:
+    name: Build and Upload JARs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'corretto'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Build with Maven
+        run: mvn clean package -ntp -B -DskipTests
+
+      - name: Verify JARs exist
+        run: |
+          echo "Checking for server.jar..."
+          ls -lh server/server.jar
+          echo "Checking for client.jar..."
+          ls -lh client/client.jar
+
+      - name: Calculate checksums
+        run: |
+          cd server
+          sha256sum server.jar > server.jar.sha256
+          cd ../client
+          sha256sum client.jar > client.jar.sha256
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload artifacts to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          echo "Uploading artifacts for release tag: $TAG"
+          
+          # Upload Server JAR and checksum
+          gh release upload "$TAG" server/server.jar server/server.jar.sha256 --clobber
+          
+          # Upload Client JAR and checksum
+          gh release upload "$TAG" client/client.jar client/client.jar.sha256 --clobber
+          
+          echo "✓ Successfully uploaded all JARs and checksums to release $TAG"

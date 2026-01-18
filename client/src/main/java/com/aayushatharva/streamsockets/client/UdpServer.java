@@ -24,8 +24,6 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollDatagramChannel;
-import io.netty.channel.epoll.EpollEventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.channel.unix.UnixChannelOption;
@@ -43,12 +41,24 @@ import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 @Log4j2
 public final class UdpServer {
 
+    static {
+        log.info("Epoll available: {}", Epoll.isAvailable());
+        if (Epoll.isAvailable()) {
+            log.info("Using Epoll for high-performance I/O");
+        } else {
+            log.info("Using NIO (consider using Linux with Epoll for better performance)");
+        }
+    }
+
     private EventLoopGroup eventLoopGroup;
     private List<ChannelFuture> channelFutures;
     private DatagramHandler datagramHandler;
 
     public void start() throws SSLException {
-        int threads = envValueAsInt("THREADS", Epoll.isAvailable() ? Runtime.getRuntime().availableProcessors() * 2 : 1);
+        // Determine if we can use SO_REUSEPORT (Epoll supports it)
+        boolean canUseReusePort = Epoll.isAvailable();
+        int threads = envValueAsInt("THREADS", canUseReusePort ? Runtime.getRuntime().availableProcessors() * 2 : 1);
+        
         eventLoopGroup = eventLoopGroup(threads);
 
         datagramHandler = new DatagramHandler(eventLoopGroup);
@@ -89,14 +99,20 @@ public final class UdpServer {
     }
 
     private static EventLoopGroup eventLoopGroup(int threads) {
+        // Note: Using traditional EventLoopGroup instead of MultiThreadIoEventLoopGroup
+        // because this EventLoopGroup is shared between UDP server and WebSocket client.
+        // In Netty 4.2.x, IoHandler-based EventLoopGroups work best when all channels
+        // using that group are of the same type. Since we mix DatagramChannel and SocketChannel,
+        // we use traditional EventLoopGroups which support IoUring/Epoll/NIO transparently.
         if (Epoll.isAvailable()) {
-            return new EpollEventLoopGroup(threads);
+            return new io.netty.channel.epoll.EpollEventLoopGroup(threads);
         } else {
-            return new NioEventLoopGroup(threads);
+            return new io.netty.channel.nio.NioEventLoopGroup(threads);
         }
     }
 
     private static ChannelFactory<DatagramChannel> channelFactory() {
+        // Use channel types compatible with the EventLoopGroup
         if (Epoll.isAvailable()) {
             return EpollDatagramChannel::new;
         } else {

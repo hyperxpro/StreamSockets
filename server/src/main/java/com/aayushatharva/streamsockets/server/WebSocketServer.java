@@ -39,6 +39,15 @@ import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 public final class WebSocketServer {
 
     private static final Logger logger = LogManager.getLogger();
+    
+    static {
+        logger.info("Epoll available: {}", Epoll.isAvailable());
+        if (Epoll.isAvailable()) {
+            logger.info("Using Epoll for high-performance I/O");
+        } else {
+            logger.info("Using NIO (consider using Linux with Epoll for better performance)");
+        }
+    }
 
     private final EventLoopGroup parentGroup = eventLoopGroup(envValueAsInt("PARENT_THREADS", Runtime.getRuntime().availableProcessors()));
     private final EventLoopGroup childGroup = eventLoopGroup(envValueAsInt("CHILD_THREADS", Runtime.getRuntime().availableProcessors()));
