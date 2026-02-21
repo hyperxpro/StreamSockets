@@ -19,6 +19,12 @@ package com.aayushatharva.streamsockets.common;
 
 public final class Utils {
 
+    /**
+     * Whether IOUring is disabled via the DISABLE_IOURING environment variable.
+     * Useful for Docker or other environments where IOUring syscalls are blocked by seccomp.
+     */
+    private static final boolean IOURING_DISABLED = "true".equalsIgnoreCase(envValue("DISABLE_IOURING", "false"));
+
     private Utils() {
         // Prevent instantiation
     }
@@ -43,5 +49,14 @@ public final class Utils {
             }
         }
         return value;
+    }
+
+    /**
+     * Returns whether IOUring is disabled via the DISABLE_IOURING environment variable.
+     * When set to "true", the application will skip IOUring even if the kernel supports it,
+     * falling back to Epoll or NIO instead.
+     */
+    public static boolean isIOUringDisabled() {
+        return IOURING_DISABLED;
     }
 }

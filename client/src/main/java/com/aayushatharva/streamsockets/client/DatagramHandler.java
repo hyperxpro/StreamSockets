@@ -55,13 +55,19 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
     private InetSocketAddress socketAddress;
     private Channel udpChannel;
-    private Channel wsChannel;
+    private volatile Channel wsChannel;
     private ChannelFuture webSocketClientFuture;
-    private WebSocketClientHandler webSocketClientHandler;
+    private volatile WebSocketClientHandler webSocketClientHandler;
     private ScheduledFuture<?> udpTimeoutTask;
     private volatile long lastUdpPacketTime;
     private volatile boolean isConnecting = false;
-    private volatile boolean isClosedFutureListenerAdded = false;
+
+    /**
+     * Epoch counter to track connection generations. Each new connection attempt increments
+     * this counter. Listeners capture the epoch at creation time and ignore events from
+     * stale connections, preventing race conditions between old and new connection attempts.
+     */
+    private int connectionEpoch = 0;
 
     DatagramHandler(EventLoopGroup eventLoopGroup) throws SSLException {
         this.eventLoopGroup = eventLoopGroup;
@@ -93,8 +99,6 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                     } catch (SSLException e) {
                         log.error("Failed to create new WebSocket connection for new UDP socket", e);
                     }
-                    // Note: newWebSocketConnection() is async and sets up its own listener at line 231-239
-                    // to send queued frames when the new connection is authenticated, so we don't need to add another listener here
                 } else {
                     webSocketClientHandler.newUdpConnection();
                     socketAddress = packet.sender();
@@ -110,30 +114,10 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                             }
 
                             // Send queued frames
-                            while (!queuedFrames.isEmpty()) {
-                                wsChannel.writeAndFlush(queuedFrames.poll());
-                            }
+                            flushQueuedFrames();
                         } else {
                             log.error("Failed to authenticate WebSocket connection", future.cause());
-                            if (Main.isExitOnFailure()) {
-                                log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
-                                System.exit(1);
-                            } else {
-                                retryManager.scheduleRetry(() -> {
-                                    try {
-                                        newWebSocketConnection();
-                                    } catch (SSLException e) {
-                                        log.error("Failed to create new WebSocket connection during retry", e);
-                                        retryManager.scheduleRetry(() -> {
-                                            try {
-                                                newWebSocketConnection();
-                                            } catch (SSLException ex) {
-                                                log.error("Retry failed, giving up", ex);
-                                            }
-                                        }, eventLoopGroup.next());
-                                    }
-                                }, eventLoopGroup.next());
-                            }
+                            handleConnectionFailure();
                         }
                     });
                 }
@@ -145,7 +129,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
             // If the WebSocket channel is active and ready for write, send the frame directly.
             // Else add the frame to the queue.
-            if (wsChannel != null && wsChannel.isActive() && webSocketClientHandler.isReadyForWrite()) {
+            if (wsChannel != null && wsChannel.isActive() && webSocketClientHandler != null && webSocketClientHandler.isReadyForWrite()) {
                 wsChannel.writeAndFlush(binaryWebSocketFrame);
             } else {
                 queuedFrames.add(binaryWebSocketFrame);
@@ -213,9 +197,15 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
 
     /**
      * Create a new WebSocket connection.
+     * <p>
+     * Uses an epoch counter to prevent stale close/auth listeners from interfering with
+     * newer connection attempts. The close future listener is added immediately on connect
+     * success to handle channel close at any point (before or after authentication).
+     *
      * @throws SSLException if the SSL context cannot be created
      */
     private void newWebSocketConnection() throws SSLException {
+        final int epoch;
         synchronized (connectionLock) {
             // Prevent multiple concurrent connection attempts
             if (isConnecting) {
@@ -225,7 +215,7 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                 return;
             }
             isConnecting = true;
-            isClosedFutureListenerAdded = false;
+            epoch = ++connectionEpoch;
         }
 
         // If existing WebSocket channel exists, close it.
@@ -233,7 +223,15 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
             wsChannel.close();
         }
 
-        webSocketClientFuture = new WebSocketClient().start(eventLoopGroup, this);
+        try {
+            webSocketClientFuture = new WebSocketClient().start(eventLoopGroup, this);
+        } catch (SSLException e) {
+            // Reset connection state so future retries are not blocked
+            synchronized (connectionLock) {
+                isConnecting = false;
+            }
+            throw e;
+        }
 
         // Wait for the WebSocket connection to be established before sending queued frames.
         webSocketClientFuture.addListener((ChannelFutureListener) future -> {
@@ -241,17 +239,47 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
             // If the future is successful, set the WebSocket channel and WebSocket client handler.
             // If the future is not successful, log the error and retry.
             if (future.isSuccess()) {
-                wsChannel = future.channel();
-                webSocketClientHandler = wsChannel.pipeline().get(WebSocketClientHandler.class);
+                final Channel newChannel = future.channel();
+
+                synchronized (connectionLock) {
+                    // Ignore if a newer connection attempt has started
+                    if (connectionEpoch != epoch) {
+                        newChannel.close();
+                        return;
+                    }
+                }
+
+                wsChannel = newChannel;
+                webSocketClientHandler = newChannel.pipeline().get(WebSocketClientHandler.class);
                 
                 // Reset retry counter on successful connection
                 retryManager.reset();
 
+                // Add close future listener IMMEDIATELY to handle channel close at any point
+                // (before, during, or after authentication). Uses epoch to ignore stale events.
+                newChannel.closeFuture().addListener(closeFuture -> {
+                    synchronized (connectionLock) {
+                        if (connectionEpoch != epoch) {
+                            // A newer connection attempt exists, ignore this close event
+                            return;
+                        }
+                        log.warn("WebSocket connection closed (epoch {})", epoch);
+                        isConnecting = false;
+                    }
+
+                    handleConnectionFailure();
+                });
+
                 // Wait for the WebSocket connection to finish authentication before sending queued frames.
                 webSocketClientHandler.authenticationFuture().addListener((ChannelFutureListener) handshakeFuture -> {
 
-                    // If the authentication future is successful, send the queued frames.
-                    // If the authentication future is not successful, log the error and retry.
+                    synchronized (connectionLock) {
+                        if (connectionEpoch != epoch) {
+                            // A newer connection attempt exists, ignore this auth event
+                            return;
+                        }
+                    }
+
                     if (handshakeFuture.isSuccess()) {
                         // Mark connection as no longer in progress
                         synchronized (connectionLock) {
@@ -259,85 +287,62 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
                         }
 
                         // Send queued frames
-                        while (!queuedFrames.isEmpty()) {
-                            wsChannel.writeAndFlush(queuedFrames.poll());
-                        }
-
-                        // Add close future listener only once per connection
-                        synchronized (connectionLock) {
-                            if (!isClosedFutureListenerAdded) {
-                                isClosedFutureListenerAdded = true;
-                                
-                                // Retry the WebSocket connection if it is closed unexpectedly.
-                                wsChannel.closeFuture().addListener(closeFuture -> {
-                                    log.warn("WebSocket connection closed");
-                                    
-                                    // Reset the connection state
-                                    synchronized (connectionLock) {
-                                        isConnecting = false;
-                                        isClosedFutureListenerAdded = false;
-                                    }
-                                    
-                                    if (Main.isExitOnFailure()) {
-                                        log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
-                                        System.exit(1);
-                                    } else {
-                                        log.warn("Will retry connection");
-                                        retryManager.scheduleRetry(() -> {
-                                            try {
-                                                newWebSocketConnection();
-                                            } catch (SSLException e) {
-                                                log.error("Failed to create new WebSocket connection during retry", e);
-                                            }
-                                        }, eventLoopGroup.next());
-                                    }
-                                });
-                            }
-                        }
+                        flushQueuedFrames();
                     } else {
                         log.error("Failed to authenticate WebSocket connection", handshakeFuture.cause());
-                        
-                        // Reset connection state before retry
-                        synchronized (connectionLock) {
-                            isConnecting = false;
-                        }
-                        
-                        if (Main.isExitOnFailure()) {
-                            log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
-                            System.exit(1);
-                        } else {
-                            retryManager.scheduleRetry(() -> {
-                                try {
-                                    newWebSocketConnection();
-                                } catch (SSLException e) {
-                                    log.error("Failed to create new WebSocket connection during retry", e);
-                                }
-                            }, eventLoopGroup.next());
-                        }
+                        // Close channel to trigger the close future listener which handles retry
+                        newChannel.close();
                     }
                 });
             } else {
                 log.error("Failed to connect to WebSocket server", future.cause());
                 
-                // Reset connection state before retry
                 synchronized (connectionLock) {
+                    if (connectionEpoch != epoch) {
+                        return;
+                    }
                     isConnecting = false;
                 }
-                
-                if (Main.isExitOnFailure()) {
-                    log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
-                    System.exit(1);
-                } else {
-                    retryManager.scheduleRetry(() -> {
-                        try {
-                            newWebSocketConnection();
-                        } catch (SSLException e) {
-                            log.error("Failed to create new WebSocket connection during retry", e);
-                        }
-                    }, eventLoopGroup.next());
-                }
+
+                handleConnectionFailure();
             }
         });
+    }
+
+    /**
+     * Handle connection failure by either exiting (if EXIT_ON_FAILURE) or scheduling a retry.
+     */
+    private void handleConnectionFailure() {
+        if (Main.isExitOnFailure()) {
+            log.error("EXIT_ON_FAILURE is enabled, exiting JVM with status 1");
+            System.exit(1);
+        } else {
+            log.warn("Will retry connection");
+            retryManager.scheduleRetry(() -> {
+                try {
+                    newWebSocketConnection();
+                } catch (SSLException e) {
+                    log.error("Failed to create new WebSocket connection during retry", e);
+                    // isConnecting was already reset in the catch block of newWebSocketConnection(),
+                    // schedule another retry
+                    handleConnectionFailure();
+                }
+            }, eventLoopGroup.next());
+        }
+    }
+
+    /**
+     * Flush all queued frames to the active WebSocket channel.
+     */
+    private void flushQueuedFrames() {
+        Channel ch = wsChannel;
+        while (!queuedFrames.isEmpty()) {
+            if (ch != null && ch.isActive()) {
+                ch.writeAndFlush(queuedFrames.poll());
+            } else {
+                break;
+            }
+        }
     }
 
     public ChannelFuture webSocketClientFuture() {
@@ -353,5 +358,17 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
             return udpChannel.close();
         }
         return null;
+    }
+
+    // Visible for testing
+    int getConnectionEpoch() {
+        synchronized (connectionLock) {
+            return connectionEpoch;
+        }
+    }
+
+    // Visible for testing
+    boolean isConnecting() {
+        return isConnecting;
     }
 }

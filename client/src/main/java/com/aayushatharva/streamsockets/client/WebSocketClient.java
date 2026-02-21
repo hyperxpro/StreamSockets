@@ -40,6 +40,7 @@ import javax.net.ssl.SSLException;
 import java.net.URI;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
+import static com.aayushatharva.streamsockets.common.Utils.isIOUringDisabled;
 import static io.netty.buffer.PooledByteBufAllocator.DEFAULT;
 
 @Log4j2
@@ -47,6 +48,10 @@ final class WebSocketClient {
 
     static {
         log.info("OpenSSL available: {}", OpenSsl.isAvailable());
+    }
+
+    private static boolean isIOUringAvailable() {
+        return !isIOUringDisabled() && IoUring.isAvailable();
     }
 
     ChannelFuture start(EventLoopGroup eventLoopGroup, DatagramHandler datagramHandler) throws SSLException {
@@ -90,7 +95,7 @@ final class WebSocketClient {
     }
 
     private static ChannelFactory<SocketChannel> channelFactory() {
-        if (IoUring.isAvailable()) {
+        if (isIOUringAvailable()) {
             return IoUringSocketChannel::new;
         } else if (Epoll.isAvailable()) {
             return EpollSocketChannel::new;

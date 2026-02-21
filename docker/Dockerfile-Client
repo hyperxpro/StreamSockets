@@ -22,5 +22,9 @@ COPY --from=build /app/client/client.jar /app/client.jar
 # JVM parameters with sensible defaults (can be overridden)
 ENV JAVA_OPTS="-XX:+UseZGC -XX:+ZGenerational -Xms512m -Xmx2g -XX:MaxDirectMemorySize=1g -XX:+AlwaysPreTouch -XX:+DisableExplicitGC"
 
+# Disable IOUring by default in Docker (seccomp blocks io_uring syscalls).
+# Set to "false" if running with --security-opt seccomp=unconfined or a custom seccomp profile.
+ENV DISABLE_IOURING="true"
+
 # Command to run the client JAR file with ZGC for low latency and improved throughput
 CMD sh -c "java $JAVA_OPTS -jar /app/client.jar"
