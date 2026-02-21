@@ -361,14 +361,14 @@ public final class DatagramHandler extends ChannelInboundHandlerAdapter {
     }
 
     // Visible for testing
-    int getConnectionEpoch() {
+    public int getConnectionEpoch() {
         synchronized (connectionLock) {
             return connectionEpoch;
         }
     }
 
     // Visible for testing
-    boolean isConnecting() {
+    public boolean isConnecting() {
         return isConnecting;
     }
 }

@@ -243,6 +243,20 @@ public class ReconnectionTest {
             // Increase socket timeout for the successful path
             socket.setSoTimeout(5000);
 
+            // Drain any stale queued responses from the earlier "no-server-test" packet
+            try {
+                while (true) {
+                    DatagramPacket drainPkt = new DatagramPacket(new byte[1024], 1024);
+                    socket.setSoTimeout(1000);
+                    socket.receive(drainPkt);
+                    String drainedData = new String(drainPkt.getData(), 0, drainPkt.getLength());
+                    log.info("Drained stale response: {}", drainedData);
+                }
+            } catch (SocketTimeoutException ignored) {
+                // No more stale responses
+            }
+            socket.setSoTimeout(5000);
+
             // Verify data flow now works
             verifyDataFlow(socket, 5, "after-server-start-");
             log.info("Data flow verified after late server start");
