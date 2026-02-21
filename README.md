@@ -24,6 +24,7 @@ services:
       - METRICS_BIND_ADDRESS=0.0.0.0
       - METRICS_PORT=9090
       - METRICS_PATH=/metrics
+      - ACCOUNTS_RELOAD_INTERVAL_SECONDS=15
     volumes:
       - ./accounts.yml:/app/accounts.yml
     ports:
@@ -68,6 +69,7 @@ services:
 - `METRICS_BIND_ADDRESS` - Address to bind the metrics server to (default: 0.0.0.0).
 - `METRICS_PORT` - Port to bind the metrics server to (default: 9090).
 - `METRICS_PATH` - Path to the metrics endpoint (default: /metrics).
+- `ACCOUNTS_RELOAD_INTERVAL_SECONDS` - Interval in seconds to reload the accounts configuration file for live updates (default: 15). Set to 0 to disable.
 
 #### Client
 - `THREADS` - Number of threads.

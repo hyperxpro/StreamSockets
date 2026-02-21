@@ -40,6 +40,10 @@ import lombok.Getter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
 import static com.aayushatharva.streamsockets.common.Utils.isIOUringDisabled;
@@ -75,10 +79,24 @@ public final class WebSocketServer {
     @Getter
     private final EventLoopGroup childGroup = eventLoopGroup(envValueAsInt("CHILD_THREADS", Runtime.getRuntime().availableProcessors()));
     private ChannelFuture channelFuture;
+    private ScheduledExecutorService reloadScheduler;
 
     public void start() {
         TokenAuthentication tokenAuthentication = new TokenAuthentication(envValue("ACCOUNTS_CONFIG_FILE", "accounts.yaml"));
         start(tokenAuthentication);
+
+        // Schedule periodic account file reload
+        int reloadIntervalSeconds = envValueAsInt("ACCOUNTS_RELOAD_INTERVAL_SECONDS", 15);
+        if (reloadIntervalSeconds > 0) {
+            reloadScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "accounts-reload");
+                t.setDaemon(true);
+                return t;
+            });
+            reloadScheduler.scheduleAtFixedRate(tokenAuthentication::reload,
+                    reloadIntervalSeconds, reloadIntervalSeconds, TimeUnit.SECONDS);
+            logger.info("Scheduled account file reload every {} seconds", reloadIntervalSeconds);
+        }
     }
 
     public void start(TokenAuthentication tokenAuthentication) {
@@ -133,6 +151,10 @@ public final class WebSocketServer {
     }
 
     public void stop() throws InterruptedException {
+        if (reloadScheduler != null) {
+            reloadScheduler.shutdown();
+            reloadScheduler.awaitTermination(5, TimeUnit.SECONDS);
+        }
         channelFuture.channel().close().sync();
         childGroup.shutdownGracefully();
         parentGroup.shutdownGracefully();
