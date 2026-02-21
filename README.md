@@ -8,7 +8,7 @@ This is useful for situations where you need to send UDP packets over a network 
 ```yaml
 services:
   streamsockets-server:
-    image: hyperxpro/streamsockets:server-1.6.0
+    image: hyperxpro/streamsockets:server-1.7.0
     container_name: streamsockets-server
     restart: unless-stopped
     environment:
@@ -37,7 +37,7 @@ services:
 ```yaml
 services:
   streamsockets-client:
-    image: hyperxpro/streamsockets:client-1.6.0
+    image: hyperxpro/streamsockets:client-1.7.0
     container_name: streamsockets-client
     restart: unless-stopped
     environment:
