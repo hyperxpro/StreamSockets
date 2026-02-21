@@ -37,10 +37,16 @@ public final class TokenAuthentication {
     private static final Logger log = LogManager.getLogger(TokenAuthentication.class);
     private final List<Accounts.Account> activeAccounts = new CopyOnWriteArrayList<>();
     private final String accountConfigFile;
-    private volatile Accounts accounts;
     
-    // Performance optimization: O(1) token lookup instead of O(n) linear search
-    private volatile Map<String, AccountCache> tokenToAccountCache;
+    // Immutable snapshot of accounts and their cache, replaced atomically on reload
+    private volatile AccountsSnapshot snapshot;
+    
+    /**
+     * Immutable snapshot containing accounts and their lookup cache.
+     * Replaced as a single volatile write to ensure atomicity.
+     */
+    private record AccountsSnapshot(Accounts accounts, Map<String, AccountCache> tokenToAccountCache) {
+    }
     
     /**
      * Cache structure to avoid repeated lookups and parsing
@@ -64,6 +70,7 @@ public final class TokenAuthentication {
     public TokenAuthentication(String accountConfigFile) {
         this.accountConfigFile = accountConfigFile;
         Yaml yaml = new Yaml();
+        Accounts accounts;
         try (FileInputStream inputStream = new FileInputStream(accountConfigFile)) {
             accounts = yaml.loadAs(inputStream, Accounts.class);
         } catch (Exception e) {
@@ -75,19 +82,18 @@ public final class TokenAuthentication {
         }
         
         // Build token lookup cache for performance
-        this.tokenToAccountCache = buildTokenCache(accounts.getAccounts());
+        this.snapshot = new AccountsSnapshot(accounts, buildTokenCache(accounts.getAccounts()));
     }
 
     public TokenAuthentication(Accounts accounts) {
         this.accountConfigFile = null;
-        this.accounts = accounts;
 
         if (hasDuplicateTokens(accounts.getAccounts())) {
             throw new IllegalArgumentException("Each account must have a unique token");
         }
         
         // Build token lookup cache for performance
-        this.tokenToAccountCache = buildTokenCache(accounts.getAccounts());
+        this.snapshot = new AccountsSnapshot(accounts, buildTokenCache(accounts.getAccounts()));
     }
 
     /**
@@ -124,9 +130,8 @@ public final class TokenAuthentication {
 
             Map<String, AccountCache> newCache = buildTokenCache(newAccounts.getAccounts());
 
-            // Volatile write ensures visibility to all threads
-            this.accounts = newAccounts;
-            this.tokenToAccountCache = newCache;
+            // Single volatile write ensures atomicity of the snapshot replacement
+            this.snapshot = new AccountsSnapshot(newAccounts, newCache);
         } catch (Exception e) {
             log.error("Failed to reload configuration file: {}", configFile, e);
         }
@@ -155,8 +160,11 @@ public final class TokenAuthentication {
      * @return {@link Accounts.Account} if the token is valid and the client IP is allowed, otherwise null.
      */
     public Accounts.Account authenticate(String token, String route, String clientIp) {
+        // Read snapshot once for consistent view
+        Map<String, AccountCache> cache = snapshot.tokenToAccountCache;
+        
         // O(1) token lookup instead of O(n) linear search
-        AccountCache accountCache = tokenToAccountCache.get(token);
+        AccountCache accountCache = cache.get(token);
         
         if (accountCache == null) {
             if (log.isDebugEnabled()) {
@@ -199,7 +207,7 @@ public final class TokenAuthentication {
      */
     public boolean containsRoute(String route) {
         // Use cached route sets for O(1) lookup per account instead of List.contains()
-        return tokenToAccountCache.values().stream()
+        return snapshot.tokenToAccountCache.values().stream()
                 .anyMatch(cache -> cache.routeSet.contains(route));
     }
 

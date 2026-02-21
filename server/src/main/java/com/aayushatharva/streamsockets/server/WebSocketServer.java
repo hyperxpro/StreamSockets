@@ -152,7 +152,8 @@ public final class WebSocketServer {
 
     public void stop() throws InterruptedException {
         if (reloadScheduler != null) {
-            reloadScheduler.shutdownNow();
+            reloadScheduler.shutdown();
+            reloadScheduler.awaitTermination(5, TimeUnit.SECONDS);
         }
         channelFuture.channel().close().sync();
         childGroup.shutdownGracefully();
