@@ -49,15 +49,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
+import static com.aayushatharva.streamsockets.common.Utils.isIOUringDisabled;
 
 @Log4j2
 public final class UdpServer {
 
+    private static boolean isIOUringAvailable() {
+        return !isIOUringDisabled() && IoUring.isAvailable();
+    }
+
     static {
         log.info("Epoll available: {}", Epoll.isAvailable());
-        log.info("IoUring available: {}", false);
+        log.info("IoUring available: {}", IoUring.isAvailable());
+        if (isIOUringDisabled()) {
+            log.info("IOUring disabled via DISABLE_IOURING environment variable");
+        }
 
-        if (IoUring.isAvailable()) {
+        if (isIOUringAvailable()) {
             log.info("Using IOUring for high-performance I/O");
         } else if (Epoll.isAvailable()) {
             log.info("Using Epoll for high-performance I/O");
@@ -72,7 +80,7 @@ public final class UdpServer {
 
     public void start() throws SSLException {
         // Determine if we can use SO_REUSEPORT (IoUring or Epoll supports it)
-        boolean canUseReusePort = IoUring.isAvailable() || Epoll.isAvailable();
+        boolean canUseReusePort = isIOUringAvailable() || Epoll.isAvailable();
         int threads = envValueAsInt("THREADS", canUseReusePort ? Runtime.getRuntime().availableProcessors() * 2 : 1);
         
         eventLoopGroup = eventLoopGroup(threads);
@@ -87,7 +95,7 @@ public final class UdpServer {
                 .handler(datagramHandler);
 
         AtomicBoolean reusePort = new AtomicBoolean(false);
-        if (IoUring.isAvailable() || Epoll.isAvailable()) {
+        if (isIOUringAvailable() || Epoll.isAvailable()) {
             bootstrap.option(UnixChannelOption.SO_REUSEPORT, true);
             reusePort.set(true);
         }
@@ -116,7 +124,7 @@ public final class UdpServer {
     private static EventLoopGroup eventLoopGroup(int threads) {
         IoHandlerFactory ioHandlerFactory;
 
-        if (IoUring.isAvailable()) {
+        if (isIOUringAvailable()) {
             ioHandlerFactory = IoUringIoHandler.newFactory();
         } else if (Epoll.isAvailable()) {
             ioHandlerFactory = EpollIoHandler.newFactory();
@@ -128,7 +136,7 @@ public final class UdpServer {
     }
 
     private static ChannelFactory<DatagramChannel> channelFactory() {
-        if (IoUring.isAvailable()) {
+        if (isIOUringAvailable()) {
             return IoUringDatagramChannel::new;
         } else if (Epoll.isAvailable()) {
             return EpollDatagramChannel::new;

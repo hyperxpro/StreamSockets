@@ -42,17 +42,25 @@ import org.apache.logging.log4j.Logger;
 
 import static com.aayushatharva.streamsockets.common.Utils.envValue;
 import static com.aayushatharva.streamsockets.common.Utils.envValueAsInt;
+import static com.aayushatharva.streamsockets.common.Utils.isIOUringDisabled;
 import static io.netty.buffer.PooledByteBufAllocator.*;
 
 public final class WebSocketServer {
 
     private static final Logger logger = LogManager.getLogger();
 
+    private static boolean isIOUringAvailable() {
+        return !isIOUringDisabled() && IoUring.isAvailable();
+    }
+
     static {
         logger.info("Epoll available: {}", Epoll.isAvailable());
         logger.info("IoUring available: {}", IoUring.isAvailable());
+        if (isIOUringDisabled()) {
+            logger.info("IOUring disabled via DISABLE_IOURING environment variable");
+        }
 
-        if (IoUring.isAvailable()) {
+        if (isIOUringAvailable()) {
             logger.info("Using IOUring for high-performance I/O");
         } else if (Epoll.isAvailable()) {
             logger.info("Using Epoll for high-performance I/O");
@@ -103,7 +111,7 @@ public final class WebSocketServer {
     private static EventLoopGroup eventLoopGroup(int threads) {
         IoHandlerFactory ioHandlerFactory;
 
-        if (IoUring.isAvailable()) {
+        if (isIOUringAvailable()) {
             ioHandlerFactory = IoUringIoHandler.newFactory();
         } else if (Epoll.isAvailable()) {
             ioHandlerFactory = EpollIoHandler.newFactory();
@@ -115,7 +123,7 @@ public final class WebSocketServer {
     }
 
     private static ChannelFactory<ServerSocketChannel> channelFactory() {
-        if (IoUring.isAvailable()) {
+        if (isIOUringAvailable()) {
             return IoUringServerSocketChannel::new;
         } else if (Epoll.isAvailable()) {
             return EpollServerSocketChannel::new;
