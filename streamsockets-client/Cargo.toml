@@ -1,0 +1,50 @@
+[package]
+name = "streamsockets-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "streamsockets-client"
+path = "src/main.rs"
+
+[dependencies]
+streamsockets-core = { path = "../streamsockets-core" }
+streamsockets-metrics = { path = "../streamsockets-metrics" }
+
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio", "client"] }
+http-body-util = { workspace = true }
+http = { workspace = true }
+fastwebsockets = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+socket2 = { workspace = true }
+subtle = "2.6"
+parking_lot = { workspace = true }
+futures-util = { workspace = true }
+mimalloc = { workspace = true }
+url = { workspace = true }
+rand = { workspace = true }
+sha1 = { workspace = true }
+base64 = { workspace = true }
+flume = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+assert_cmd = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

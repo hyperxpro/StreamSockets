@@ -1,0 +1,40 @@
+[package]
+name = "streamsockets-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Pull in the Linux io_uring path. Implies tokio-uring + io-uring crate links.
+# Always paired with `cfg(target_os = "linux")` at the module level.
+uring = ["dep:tokio-uring", "dep:io-uring"]
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+once_cell = { workspace = true }
+thiserror = { workspace = true }
+libc = "0.2"
+core_affinity = { workspace = true }
+bytes = { workspace = true }
+smallvec = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+socket2 = { workspace = true }
+
+tokio = { workspace = true, features = ["rt", "net", "time", "macros", "sync"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+io-uring = { workspace = true, optional = true }
+tokio-uring = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync", "io-util"] }
+
+[lints]
+workspace = true

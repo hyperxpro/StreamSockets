@@ -1,0 +1,28 @@
+[package]
+name = "streamsockets-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+streamsockets-core = { path = "../streamsockets-core" }
+prometheus = { workspace = true }
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio", "server"] }
+http-body-util = { workspace = true }
+http = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

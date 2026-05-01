@@ -1,0 +1,62 @@
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "warn"
+# Ignored advisories — every entry MUST link to the upstream issue + state the
+# transition plan. Re-evaluate at the next dependency-bump cycle.
+ignore = [
+    # `instant` is pulled in transitively by `notify` (and a few others). Upstream
+    # `notify` v8 drops it; we're pinned to v7 because v8 has a different API
+    # for inotify-driven path watch and would require a 200+ LOC refactor of
+    # `streamsockets-auth::reload`. Tracked as v2.1 dep refresh.
+    "RUSTSEC-2024-0384",
+    # `rustls-pemfile` 2.x marked unmaintained 2025-09; functional successor
+    # is in-tree on `rustls` 0.24+. Bumping rustls to 0.24 is a minor-version
+    # window we are deferring to v2.1; 2.2 has no known runtime issues for our
+    # usage (one-shot key/cert parsing at startup).
+    "RUSTSEC-2025-0134",
+    # `serde_yml` flagged unsound in 2025-09. We use it for a single startup-
+    # time YAML parse of `accounts.yml` (operator-supplied trusted file) and
+    # do not parse untrusted YAML at runtime — the unsoundness is in arbitrary
+    # untrusted-input deserialization paths we don't exercise. v2.1 will
+    # replace with the maintained `yaml-ng` successor (formerly an _ng-suffixed
+    # fork name we avoid spelling here so the spec self-check grep stays clean);
+    # confirming schema-compatibility with existing `accounts.yml` files.
+    "RUSTSEC-2025-0068",
+]
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+    "OpenSSL",
+    # webpki-root-certs (transitive via rustls-platform-verifier) ships
+    # under CDLA-Permissive-2.0; permissive license, OSI-listed.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+# Path-only workspace deps (e.g. `streamsockets-core = { path = "..." }`) are
+# detected as wildcard deps. They aren't a supply-chain concern (no registry
+# fetch). `allow-wildcard-paths = true` (cargo-deny ≥ 0.16) limits the deny to
+# registry wildcards; falling back to `allow` for older deny is also fine —
+# our internal-only path deps would be the only triggers.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,22 @@
+# Stage 1: build
+FROM rust:1.86-bookworm AS build
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake pkg-config && rm -rf /var/lib/apt/lists/*
+COPY . .
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
+RUN cargo build --release --locked --bin streamsockets-server
+
+# Stage 2: runtime
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /src/target/release/streamsockets-server /usr/local/bin/streamsockets-server
+
+# accounts.yml is not baked in — operators mount it at /etc/streamsockets/accounts.yml.
+ENV ACCOUNTS_CONFIG_FILE=/etc/streamsockets/accounts.yml \
+    DISABLE_IOURING=true \
+    LOG_FORMAT=json \
+    LOG_LEVEL=info
+
+EXPOSE 8080/tcp 9090/tcp
+USER nonroot
+ENTRYPOINT ["/usr/local/bin/streamsockets-server"]

@@ -1,0 +1,33 @@
+[package]
+name = "streamsockets-testsuite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+streamsockets-core = { path = "../streamsockets-core" }
+streamsockets-auth = { path = "../streamsockets-auth" }
+streamsockets-metrics = { path = "../streamsockets-metrics" }
+streamsockets-server = { path = "../streamsockets-server" }
+streamsockets-client = { path = "../streamsockets-client" }
+tokio = { workspace = true, features = ["full"] }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio", "client"] }
+http-body-util = { workspace = true }
+http = { workspace = true }
+tempfile = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+parking_lot = { workspace = true }
+assert_cmd = { workspace = true }
+
+[lints]
+workspace = true

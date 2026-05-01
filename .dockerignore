@@ -1,0 +1,24 @@
+# Keep the build context lean — never ship build artifacts into the Docker daemon.
+target
+**/target/
+**/*.rs.bk
+
+# Java legacy artifacts (kept for the .jar/.class line — Java tree itself is gone)
+*.jar
+*.class
+
+# IDE / editor
+.idea
+.vscode
+*.iml
+
+# VCS
+.git
+.gitignore
+.github
+
+# Misc
+docker
+docs
+*.md
+LICENSE

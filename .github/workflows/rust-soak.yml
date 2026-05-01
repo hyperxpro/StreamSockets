@@ -1,0 +1,36 @@
+name: Rust Release Soak (FD-leak smoke)
+
+on:
+  push:
+    tags:
+      - "v2.*"
+  workflow_dispatch:
+
+# Per docs/v2.md §11.5: every release tag runs a 5-minute FD-leak smoke
+# (SOAK_DURATION_HOURS=0.083) that exercises 1000 tunnels × 10 pps with
+# the same code path that the operator's 24-hour pre-cutover soak runs.
+# A leak that doubles every minute is caught here; a slow leak (drift of
+# a few FDs per hour) is caught only by the manual 24-hour run.
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  SOAK_DURATION_HOURS: "0.083"
+
+jobs:
+  fd-leak-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: soak
+      - name: Run FD-leak soak (5 minutes)
+        # 1000 tunnels × 2 sockets × 2 sides ≈ 4000 sockets plus overhead;
+        # the runner's default `ulimit -n` of 1024 is too low.
+        run: |
+          ulimit -n 65536
+          cargo test --release --test soak_fd_leak \
+            -- --ignored --nocapture

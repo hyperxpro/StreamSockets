@@ -1,0 +1,29 @@
+[package]
+name = "streamsockets-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+streamsockets-core = { path = "../streamsockets-core" }
+serde = { workspace = true }
+serde_yml = { workspace = true }
+ipnet = { workspace = true }
+arc-swap = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time", "fs", "macros"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+notify = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+subtle = "2.6"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
