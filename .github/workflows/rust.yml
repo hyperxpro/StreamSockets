@@ -89,6 +89,13 @@ jobs:
       # The native io_uring path is exercised by `build-test-linux` (x86_64
       # on a real kernel). The default `--features` set does not enable
       # `tokio-uring` today; if that changes, re-evaluate this comment.
+      #
+      # Tests that exercise `recvmsg(MSG_TRUNC)` + ancillary cmsg paths skip
+      # themselves when `CROSS_RUNNER=qemu-user` (cross sets this on the
+      # container automatically): qemu-aarch64-user mistranslates that
+      # syscall surface — assertions misfire and the translator occasionally
+      # SIGSEGVs. Coverage isn't lost; `build-test-linux` exercises those
+      # paths on a real kernel.
       - name: Cross test
         env:
           DISABLE_IOURING: "true"

@@ -369,6 +369,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn tokio_udp_non_gro_truncation_surfaces() {
+        // qemu-aarch64-user (cross test runner) SIGSEGVs inside the
+        // recvmsg(MSG_TRUNC) translator; covered natively by build-test-linux.
+        if std::env::var("CROSS_RUNNER").as_deref() == Ok("qemu-user") {
+            eprintln!("skipping tokio_udp_non_gro_truncation_surfaces: CROSS_RUNNER=qemu-user");
+            return;
+        }
         let a = tokio::net::UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("test");

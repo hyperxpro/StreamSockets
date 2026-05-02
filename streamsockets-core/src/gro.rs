@@ -171,6 +171,20 @@ mod tests {
     use super::*;
     use std::os::fd::AsFd;
 
+    /// `cross test` runs aarch64 binaries under qemu-user, which mistranslates
+    /// `recvmsg(MSG_TRUNC)` + ancillary cmsg payloads (assertions misfire and
+    /// the syscall translator occasionally SIGSEGVs). cross sets
+    /// `CROSS_RUNNER=qemu-user` on the container; tests that depend on the
+    /// kernel's actual behaviour for this surface bail out here. The same
+    /// paths are exercised natively by the x86_64 `build-test-linux` job.
+    fn skip_under_qemu_user(test_name: &str) -> bool {
+        if std::env::var("CROSS_RUNNER").as_deref() == Ok("qemu-user") {
+            eprintln!("skipping {test_name}: CROSS_RUNNER=qemu-user");
+            return true;
+        }
+        false
+    }
+
     #[test]
     fn enable_gro_on_udp_socket() {
         let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("test");
@@ -233,6 +247,9 @@ mod tests {
     /// pre-size, MSG_CTRUNC must not appear.
     #[test]
     fn recvmsg_gro_no_ctrunc_with_timestamping_enabled() {
+        if skip_under_qemu_user("recvmsg_gro_no_ctrunc_with_timestamping_enabled") {
+            return;
+        }
         let a = std::net::UdpSocket::bind("127.0.0.1:0").expect("test");
         let b = std::net::UdpSocket::bind("127.0.0.1:0").expect("test");
         let one: libc::c_int = 1;
@@ -270,6 +287,9 @@ mod tests {
     /// surfacing relies on.
     #[test]
     fn nix_recvmsg_msg_ctrunc_fires_when_cmsg_buf_too_small() {
+        if skip_under_qemu_user("nix_recvmsg_msg_ctrunc_fires_when_cmsg_buf_too_small") {
+            return;
+        }
         let a = std::net::UdpSocket::bind("127.0.0.1:0").expect("test");
         let b = std::net::UdpSocket::bind("127.0.0.1:0").expect("test");
         let one: libc::c_int = 1;
