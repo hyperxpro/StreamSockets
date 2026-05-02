@@ -48,9 +48,9 @@ pub async fn run_tunnel(
     };
 
     let mut ws = ws;
-    // RFC 6455: server enforces the configured frame cap exactly. The previous
-    // `*2` doubling let a peer send messages 2× the advertised max.
-    ws.set_max_message_size(max_frame);
+    // Per MIGRATION.md §5.3: continuation reassembly bounded at MAX_FRAME_SIZE × 2
+    // to bound slow-loris fragmentation. Defaults to 65536 × 2 = 131072.
+    ws.set_max_message_size(max_frame.saturating_mul(2));
     ws.set_auto_close(true);
     ws.set_auto_pong(true);
     ws.set_writev(false);
@@ -200,8 +200,7 @@ pub async fn run_tunnel(
         let span = SERVER_PING_INTERVAL.as_millis() as u64 / 5; // 20% range
         rand::thread_rng().gen_range(0..=span)
     };
-    let first_tick = tokio::time::Instant::now()
-        + SERVER_PING_INTERVAL
+    let first_tick = tokio::time::Instant::now() + SERVER_PING_INTERVAL
         - Duration::from_millis(SERVER_PING_INTERVAL.as_millis() as u64 / 10)
         + Duration::from_millis(jitter_ms);
     let mut ping_iv = tokio::time::interval_at(first_tick, SERVER_PING_INTERVAL);

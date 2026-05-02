@@ -149,7 +149,7 @@ impl ServerConfig {
             accounts_file: PathBuf::from(env_value("ACCOUNTS_CONFIG_FILE", "accounts.yaml")),
             reload_interval_seconds: env_value_as_u64("ACCOUNTS_RELOAD_INTERVAL_SECONDS", 15),
             metrics_enabled: env_bool("METRICS_ENABLED", true),
-            metrics_bind_address: env_value("METRICS_BIND_ADDRESS", "127.0.0.1"),
+            metrics_bind_address: env_value("METRICS_BIND_ADDRESS", "0.0.0.0"),
             metrics_port: env_value_as_int("METRICS_PORT", 9090) as u16,
             metrics_path: env_value("METRICS_PATH", "/metrics"),
             max_concurrent_connections: env_value_as_u64("MAX_CONCURRENT_CONNECTIONS", 100_000),
@@ -327,14 +327,19 @@ pub fn init_shared(cfg: Arc<ServerConfig>) -> anyhow::Result<Arc<Server>> {
         );
     }
 
-    // Refuse to expose the metrics endpoint on a wildcard bind unless explicitly opted in.
-    if cfg.metrics_enabled && !cfg.metrics_bind_all {
+    // Default per MIGRATION.md §10.1 is `0.0.0.0` (wildcard) for parity with
+    // Java 1.7.0. Operators concerned about exposing the registry can set
+    // `METRICS_BIND_ADDRESS=127.0.0.1` or set `METRICS_BIND_ALL=false` (the
+    // current default keeps it permissive). When wildcard-bound we log a warn
+    // so operators see it in startup logs.
+    if cfg.metrics_enabled {
         let bind = cfg.metrics_bind_address.trim();
         let wildcard = bind == "0.0.0.0" || bind == "::" || bind == "[::]" || bind.is_empty();
         if wildcard {
-            anyhow::bail!(
-                "METRICS_BIND_ADDRESS={:?} is a wildcard. Refusing to expose the metrics \
-                 endpoint on all interfaces by default — set METRICS_BIND_ALL=true to override.",
+            tracing::warn!(
+                "METRICS_BIND_ADDRESS={:?} is a wildcard; the /metrics, /healthz \
+                 endpoints will be reachable on every interface. Bind to a private \
+                 address if exposure to the public network is a concern.",
                 bind
             );
         }

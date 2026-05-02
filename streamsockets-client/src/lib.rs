@@ -218,7 +218,7 @@ impl ClientConfig {
             queue_max_bytes: env_value_as_u64("QUEUE_MAX_BYTES", 1_048_576),
             queue_drain_timeout_ms: env_value_as_u64("QUEUE_DRAIN_TIMEOUT_MS", 30_000),
             threads: env_value_as_int("THREADS", default_threads as i64) as u32,
-            max_frame_size: env_value_as_int("MAX_FRAME_SIZE", 65535) as usize,
+            max_frame_size: env_value_as_int("MAX_FRAME_SIZE", 65536) as usize,
             udp_channel_capacity: env_value_as_int("UDP_CHANNEL_CAPACITY", 1024) as usize,
             allow_insecure_auth: env_bool("ALLOW_INSECURE_AUTH", false),
             allow_no_auth: env_bool("ALLOW_NO_AUTH", false),
@@ -247,9 +247,9 @@ impl ClientConfig {
                 self.max_frame_size
             )));
         }
-        if self.max_frame_size > 65535 {
+        if self.max_frame_size > 65536 {
             return Err(ConfigError::Invalid(format!(
-                "MAX_FRAME_SIZE={} exceeds u16 max (65535)",
+                "MAX_FRAME_SIZE={} exceeds documented ceiling (65536)",
                 self.max_frame_size
             )));
         }
@@ -488,12 +488,12 @@ pub fn init_shared(cfg: &ClientConfig) {
     }
     if cfg.allow_insecure_auth {
         warn!(
-            "ALLOW_INSECURE_AUTH=true: AUTH_TOKEN will be sent in cleartext over ws://. \
-             Use wss:// in production."
+            "ALLOW_INSECURE_AUTH=true: bearer credentials will be sent in cleartext \
+             over ws://. Use wss:// in production."
         );
     }
     if cfg.allow_no_auth && cfg.auth_token.is_empty() {
-        warn!("ALLOW_NO_AUTH=true: starting client without an AUTH_TOKEN");
+        warn!("ALLOW_NO_AUTH=true: starting client without an auth credential");
     }
 
     if cfg.client_ip_header_warning_applies() {

@@ -826,15 +826,15 @@ mod tests {
     }
 
     fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
+        s.parse().expect("test")
     }
 
     #[test]
     fn build_and_query() {
-        let snap = AccountsSnapshot::build(sample_file()).unwrap();
+        let snap = AccountsSnapshot::build(sample_file()).expect("test");
         let m = snap.authenticate("tok1", "127.0.0.1:8888", ip("127.0.0.1"));
         assert!(m.is_some());
-        assert_eq!(m.unwrap().account.name, "user1");
+        assert_eq!(m.expect("test").account.name, "user1");
         assert!(snap
             .authenticate("tok1", "127.0.0.1:8888", ip("192.168.1.50"))
             .is_some());
@@ -866,25 +866,25 @@ mod tests {
 
     #[test]
     fn lease_no_reuse_conflicts() {
-        let auth = TokenAuthentication::from_accounts(sample_file()).unwrap();
+        let auth = TokenAuthentication::from_accounts(sample_file()).expect("test");
         let snap = auth.snapshot_arc();
         let hash = token_hash(b"tok1");
-        let acc = snap.by_token_hash.get(&hash).unwrap().account.clone();
-        let g1 = auth.leases().try_lease_arc(&acc).unwrap();
+        let acc = snap.by_token_hash.get(&hash).expect("test").account.clone();
+        let g1 = auth.leases().try_lease_arc(&acc).expect("test");
         let r2 = auth.leases().try_lease_arc(&acc);
         assert!(matches!(r2, Err(LeaseError::Conflict)));
         drop(g1);
-        let _g3 = auth.leases().try_lease_arc(&acc).unwrap();
+        let _g3 = auth.leases().try_lease_arc(&acc).expect("test");
     }
 
     #[test]
     fn lease_reuse_true_allows_concurrent() {
-        let auth = TokenAuthentication::from_accounts(sample_file()).unwrap();
+        let auth = TokenAuthentication::from_accounts(sample_file()).expect("test");
         let snap = auth.snapshot_arc();
         let hash = token_hash(b"tok2");
-        let acc = snap.by_token_hash.get(&hash).unwrap().account.clone();
-        let g1 = auth.leases().try_lease_arc(&acc).unwrap();
-        let g2 = auth.leases().try_lease_arc(&acc).unwrap();
+        let acc = snap.by_token_hash.get(&hash).expect("test").account.clone();
+        let g1 = auth.leases().try_lease_arc(&acc).expect("test");
+        let g2 = auth.leases().try_lease_arc(&acc).expect("test");
         assert_eq!(auth.leases().active_count(&acc), 2);
         drop(g1);
         drop(g2);
@@ -894,10 +894,10 @@ mod tests {
     #[test]
     fn lease_cas_serializes_concurrent_attempts() {
         use std::sync::atomic::AtomicUsize;
-        let auth = Arc::new(TokenAuthentication::from_accounts(sample_file()).unwrap());
+        let auth = Arc::new(TokenAuthentication::from_accounts(sample_file()).expect("test"));
         let snap = auth.snapshot_arc();
         let hash = token_hash(b"tok1");
-        let acc = snap.by_token_hash.get(&hash).unwrap().account.clone();
+        let acc = snap.by_token_hash.get(&hash).expect("test").account.clone();
 
         let won = Arc::new(AtomicUsize::new(0));
         let conflict = Arc::new(AtomicUsize::new(0));
@@ -923,7 +923,7 @@ mod tests {
             }));
         }
         for h in handles {
-            h.join().unwrap();
+            h.join().expect("test");
         }
         assert_eq!(
             won.load(Ordering::SeqCst) + conflict.load(Ordering::SeqCst),
@@ -942,14 +942,14 @@ mod tests {
             routes: vec![],
             allowed_ips: vec![],
         });
-        let g1 = leases.try_lease_arc(&acc).unwrap();
-        let _g2 = leases.try_lease_arc(&acc).unwrap();
-        let _g3 = leases.try_lease_arc(&acc).unwrap();
+        let g1 = leases.try_lease_arc(&acc).expect("test");
+        let _g2 = leases.try_lease_arc(&acc).expect("test");
+        let _g3 = leases.try_lease_arc(&acc).expect("test");
         let r = leases.try_lease_arc(&acc);
         assert!(matches!(r, Err(LeaseError::Exhausted)));
         assert_eq!(leases.active_count(&acc), 3);
         drop(g1);
-        let _g4 = leases.try_lease_arc(&acc).unwrap();
+        let _g4 = leases.try_lease_arc(&acc).expect("test");
         assert_eq!(leases.active_count(&acc), 3);
     }
 
@@ -963,7 +963,7 @@ mod tests {
             routes: vec![],
             allowed_ips: vec![],
         });
-        let g = leases.try_lease_arc(&acc).unwrap();
+        let g = leases.try_lease_arc(&acc).expect("test");
         let h = token_hash(b"tok-gc");
         assert!(leases.active.contains_key(&h));
         drop(g);
@@ -975,21 +975,21 @@ mod tests {
     fn lease_survives_reload_when_token_unchanged() {
         // Two snapshots issuing fresh Arc<Account> with the same token must
         // resolve to the same lease slot.
-        let snap1 = AccountsSnapshot::build(sample_file()).unwrap();
-        let snap2 = AccountsSnapshot::build(sample_file()).unwrap();
+        let snap1 = AccountsSnapshot::build(sample_file()).expect("test");
+        let snap2 = AccountsSnapshot::build(sample_file()).expect("test");
         let h = token_hash(b"tok2");
-        let acc1 = snap1.by_token_hash.get(&h).unwrap().account.clone();
-        let acc2 = snap2.by_token_hash.get(&h).unwrap().account.clone();
+        let acc1 = snap1.by_token_hash.get(&h).expect("test").account.clone();
+        let acc2 = snap2.by_token_hash.get(&h).expect("test").account.clone();
         // They are distinct Arc allocations:
         assert!(!Arc::ptr_eq(&acc1, &acc2));
 
         let leases = Arc::new(LeaseTracker::new());
-        let g1 = leases.try_lease_arc(&acc1).unwrap();
+        let g1 = leases.try_lease_arc(&acc1).expect("test");
         // Release-via-acc2 path: hash-keyed tracker must observe count==1
         // for either Arc identity.
         assert_eq!(leases.active_count(&acc1), 1);
         assert_eq!(leases.active_count(&acc2), 1);
-        let g2 = leases.try_lease_arc(&acc2).unwrap();
+        let g2 = leases.try_lease_arc(&acc2).expect("test");
         assert_eq!(leases.active_count(&acc1), 2);
         drop(g1);
         drop(g2);
@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn authenticate_timing_smoke() {
         use std::time::Instant;
-        let snap = AccountsSnapshot::build(sample_file()).unwrap();
+        let snap = AccountsSnapshot::build(sample_file()).expect("test");
         let ip4 = ip("127.0.0.1");
 
         // Warm up.
@@ -1044,7 +1044,7 @@ mod tests {
     #[tokio::test]
     async fn reload_swap_and_malformed_preserves_snapshot() {
         use std::io::Write;
-        let mut tf = tempfile::NamedTempFile::new().unwrap();
+        let mut tf = tempfile::NamedTempFile::new().expect("test");
         let yaml1 = r#"
 accounts:
   - name: u1
@@ -1053,10 +1053,10 @@ accounts:
     routes: ["127.0.0.1:1"]
     allowedIps: ["127.0.0.1"]
 "#;
-        tf.write_all(yaml1.as_bytes()).unwrap();
-        tf.flush().unwrap();
+        tf.write_all(yaml1.as_bytes()).expect("test");
+        tf.flush().expect("test");
 
-        let auth = TokenAuthentication::from_file(tf.path()).unwrap();
+        let auth = TokenAuthentication::from_file(tf.path()).expect("test");
         let snap1 = auth.snapshot_arc();
         let h_old = token_hash(b"tok-old");
         let h_new = token_hash(b"tok-new");
@@ -1071,13 +1071,13 @@ accounts:
     routes: ["127.0.0.1:1"]
     allowedIps: ["127.0.0.1"]
 "#;
-        std::fs::write(tf.path(), yaml2).unwrap();
+        std::fs::write(tf.path(), yaml2).expect("test");
         auth.reload().await;
         let snap2 = auth.snapshot_arc();
         assert!(snap2.by_token_hash.contains_key(&h_new));
         assert!(!snap2.by_token_hash.contains_key(&h_old));
 
-        std::fs::write(tf.path(), b": : : not yaml").unwrap();
+        std::fs::write(tf.path(), b": : : not yaml").expect("test");
         auth.reload().await;
         let snap3 = auth.snapshot_arc();
         assert!(
@@ -1098,7 +1098,7 @@ accounts:
     routes: ["127.0.0.1:1"]
     allowedIps: ["127.0.0.1"]
 "#;
-        std::fs::write(tf.path(), yaml_dup).unwrap();
+        std::fs::write(tf.path(), yaml_dup).expect("test");
         auth.reload().await;
         let snap4 = auth.snapshot_arc();
         assert!(

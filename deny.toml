@@ -75,8 +75,6 @@ skip = [
     # cpufeatures 0.2 lingers in the rustls/aws-lc-rs subtree; 0.3 is current.
     # Bumps when aws-lc-rs releases a build that adopts 0.3.
     { name = "cpufeatures", version = "0.2" },
-    # getrandom 0.2 vs 0.3 — same pattern; rand_core 0.6 still pins 0.2.
-    { name = "getrandom", version = "0.2" },
     # hashbrown 0.14 via prometheus 0.13's transitive deps; 0.15 elsewhere.
     { name = "hashbrown", version = "0.14" },
     # socket2 0.5 vs 0.6: hickory-resolver pins 0.5; tokio 1.43 uses 0.6.
@@ -86,6 +84,24 @@ skip = [
     # ETA covers most of these).
     { name = "thiserror", version = "1" },
     { name = "thiserror-impl", version = "1" },
+    # Windows-only transitives. We target Linux only (server/client images
+    # build Linux x86_64 / aarch64); these crates are pulled in by
+    # cross-platform libraries (mio, parking_lot, etc.) and resolve to
+    # multiple versions in the lockfile. None ship in our release binaries
+    # but cargo-deny scans the resolved dep graph regardless. Listed
+    # explicitly rather than wildcarded so a future bump shows up as a diff.
+    { name = "redox_syscall", version = "0.5" },
+    { name = "windows-sys", version = "0.45" },
+    { name = "windows-sys", version = "0.52" },
+    { name = "windows-sys", version = "0.59" },
+    { name = "windows-targets", version = "0.42" },
+    { name = "windows_aarch64_gnullvm", version = "0.42" },
+    { name = "windows_aarch64_msvc", version = "0.42" },
+    { name = "windows_i686_gnu", version = "0.42" },
+    { name = "windows_i686_msvc", version = "0.42" },
+    { name = "windows_x86_64_gnu", version = "0.42" },
+    { name = "windows_x86_64_gnullvm", version = "0.42" },
+    { name = "windows_x86_64_msvc", version = "0.42" },
 ]
 # Path-only workspace deps (e.g. `streamsockets-core = { path = "..." }`) are
 # detected as wildcard deps. They aren't a supply-chain concern (no registry

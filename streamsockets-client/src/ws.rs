@@ -71,16 +71,13 @@ impl std::fmt::Display for DialError {
 
 impl DialError {
     /// Should the FSM treat this as terminal (no retry)?
+    ///
+    /// Per MIGRATION.md §6.5 the terminal HTTP-status set is exactly
+    /// `401`, `403`, `409`. Every other status code is treated as transient
+    /// and retried (subject to `RETRY_BUDGET`).
     pub fn is_terminal(&self) -> bool {
         if let DialError::HandshakeStatus(s) = self {
-            return matches!(
-                s.as_u16(),
-                // (#16) 400: server says our handshake is malformed; retry won't help.
-                400
-                | 401 | 403 | 409 | 410 | 426 | 451
-                // (#18) Permanent redirects: hyper does not follow on Upgrade.
-                | 301 | 302 | 308
-            );
+            return matches!(s.as_u16(), 401 | 403 | 409);
         }
         matches!(self, DialError::BadUri(_) | DialError::InsecureScheme)
     }

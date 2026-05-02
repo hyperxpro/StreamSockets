@@ -886,7 +886,7 @@ mod tests {
         // §13.3 row 13
         m.udp_idle_closes.inc();
 
-        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).expect("test");
         for name in ALL_METRIC_NAMES {
             assert!(text.contains(name), "missing metric: {name}");
         }
@@ -918,7 +918,7 @@ mod tests {
         ] {
             m.handshake_failures.with_label_values(&[r]).inc();
         }
-        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).expect("test");
         for r in [
             "auth",
             "ip_denied",
@@ -943,7 +943,7 @@ mod tests {
         let m = Metrics::new();
         m.ws_close.with_label_values(&["server", "1000"]).inc();
         m.ws_close.with_label_values(&["client", "1000"]).inc();
-        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).expect("test");
         assert!(text.contains("side=\"server\""));
         assert!(text.contains("side=\"client\""));
     }
@@ -954,7 +954,7 @@ mod tests {
         let m = Metrics::new();
         m.record_connection_start("a");
         m.record_connection_end("a", 7.0);
-        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).expect("test");
         // Spec §9.1: buckets 1, 5, 10, 30, 60, 300, 600, 1800, 3600
         for b in ["1", "5", "10", "30", "60", "300", "600", "1800", "3600"] {
             let needle = format!("le=\"{b}\"");
@@ -969,7 +969,7 @@ mod tests {
         for k in ["io_uring", "epoll", "tokio"] {
             m.runtime_kind.with_label_values(&[k]).set(1.0);
         }
-        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).expect("test");
         for k in ["io_uring", "epoll", "tokio"] {
             assert!(text.contains(&format!("kind=\"{k}\"")), "missing kind={k}");
         }

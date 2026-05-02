@@ -100,9 +100,8 @@ pub async fn process(
         // bytes as last time, we know no progress was made; sleep briefly so
         // the slowloris cost is at most ~100 iterations × 5 ms = 500 ms.
         if peeked > 0 && peeked == last_peeked {
-            let nap = tokio::time::sleep_until(
-                tokio::time::Instant::now() + Duration::from_millis(5),
-            );
+            let nap =
+                tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_millis(5));
             tokio::pin!(nap);
             tokio::select! {
                 _ = &mut nap => {}

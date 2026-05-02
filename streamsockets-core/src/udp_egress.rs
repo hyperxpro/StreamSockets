@@ -326,17 +326,28 @@ mod tests {
 
     #[tokio::test]
     async fn tokio_udp_round_trip() {
-        let a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        a.connect(b.local_addr().unwrap()).await.unwrap();
-        b.connect(a.local_addr().unwrap()).await.unwrap();
+        let a = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("test");
+        let b = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("test");
+        a.connect(b.local_addr().expect("test"))
+            .await
+            .expect("test");
+        b.connect(a.local_addr().expect("test"))
+            .await
+            .expect("test");
 
         let mut sender = TokioUdp::from_socket(Arc::new(a));
         let mut receiver = TokioUdp::from_socket(Arc::new(b));
         let pool = BufPool::new(4, 4096);
 
-        sender.send(Bytes::from_static(b"ping")).await.unwrap();
-        let batch = receiver.recv_segments(&pool).await.unwrap();
+        sender
+            .send(Bytes::from_static(b"ping"))
+            .await
+            .expect("test");
+        let batch = receiver.recv_segments(&pool).await.expect("test");
         assert_eq!(batch.len(), 1);
         assert_eq!(batch.segment(0), b"ping");
     }
@@ -344,7 +355,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn tokio_udp_gro_enables_or_falls_back_cleanly() {
-        let a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("test");
         let mut udp = TokioUdp::from_socket(Arc::new(a));
         // Result is Ok regardless: true on kernel ≥ 5.0, false on older.
         let r = udp.try_enable_gro();
@@ -356,15 +369,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn tokio_udp_non_gro_truncation_surfaces() {
-        let a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        a.connect(b.local_addr().unwrap()).await.unwrap();
-        b.connect(a.local_addr().unwrap()).await.unwrap();
+        let a = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("test");
+        let b = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("test");
+        a.connect(b.local_addr().expect("test"))
+            .await
+            .expect("test");
+        b.connect(a.local_addr().expect("test"))
+            .await
+            .expect("test");
 
         let mut receiver = TokioUdp::from_socket(Arc::new(a));
         // Pool buffers are 64B; we send 2000B → wire_len > buf_len.
         let pool = BufPool::new(4, 64);
-        b.send(&vec![0xAB; 2000]).await.unwrap();
+        b.send(&vec![0xAB; 2000]).await.expect("test");
 
         let err = match receiver.recv_segments(&pool).await {
             Ok(_) => panic!("expected truncation error"),

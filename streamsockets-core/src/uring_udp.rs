@@ -331,25 +331,25 @@ mod tests {
             #[allow(clippy::arc_with_non_send_sync)]
             let registry = Arc::new(UringBufRegistry::new(8, 1024).expect("register buffers"));
 
-            let server = UdpSocket::bind("127.0.0.1:0".parse().unwrap())
+            let server = UdpSocket::bind("127.0.0.1:0".parse().expect("test"))
                 .await
-                .unwrap();
-            let server_addr = server.local_addr().unwrap();
-            let client = UdpSocket::bind("127.0.0.1:0".parse().unwrap())
+                .expect("test");
+            let server_addr = server.local_addr().expect("test");
+            let client = UdpSocket::bind("127.0.0.1:0".parse().expect("test"))
                 .await
-                .unwrap();
-            let client_addr = client.local_addr().unwrap();
+                .expect("test");
+            let client_addr = client.local_addr().expect("test");
 
             // Connect both ends.
-            server.connect(client_addr).await.unwrap();
-            client.connect(server_addr).await.unwrap();
+            server.connect(client_addr).await.expect("test");
+            client.connect(server_addr).await.expect("test");
 
             let mut s = IoUringUdp::connected(server, registry.clone());
             let mut c = IoUringUdp::connected(client, registry.clone());
 
             let pool = BufPool::new(4, 1024);
-            s.send(Bytes::from_static(b"ping")).await.unwrap();
-            let batch = c.recv_segments(&pool).await.unwrap();
+            s.send(Bytes::from_static(b"ping")).await.expect("test");
+            let batch = c.recv_segments(&pool).await.expect("test");
             assert_eq!(batch.len(), 1);
             assert_eq!(batch.segment(0), b"ping");
         });

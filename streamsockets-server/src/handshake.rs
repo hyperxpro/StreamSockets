@@ -520,6 +520,12 @@ async fn handle_request(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|s| s.split(',').any(|p| p.trim() == "streamsockets.v2"));
 
+    // Capture whether the client included an explicit X-StreamSockets-Version
+    // header before we hand `req` to the upgrade routine (which needs a mut
+    // borrow). Per MIGRATION.md §5.1 the server only echoes the version
+    // header when the request carried one.
+    let echo_version = headers.get("X-StreamSockets-Version").is_some();
+
     server
         .metrics
         .handshake_version
@@ -541,15 +547,15 @@ async fn handle_request(
             HeaderValue::from_static("streamsockets.v2"),
         );
     }
-    response
-        .headers_mut()
-        .insert("X-StreamSockets-Version", HeaderValue::from_static("2"));
+    if echo_version {
+        response
+            .headers_mut()
+            .insert("X-StreamSockets-Version", HeaderValue::from_static("2"));
+    }
 
     let account_name = cache.account.name.clone();
     let server_for_tunnel = server.clone();
     let max_frame = server.cfg.max_frame_size;
-    // TODO: switch to `Uuid::now_v7()` for sortable IDs once the `uuid` crate's
-    // `v7` feature is enabled in the workspace. Currently only `v4` is wired in.
     let tunnel_id = uuid::Uuid::new_v4();
     info!(
         account = %account_name,

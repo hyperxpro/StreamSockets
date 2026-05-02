@@ -39,6 +39,6 @@ ENV DISABLE_IOURING=true \
     LOG_FORMAT=json \
     LOG_LEVEL=info
 
-EXPOSE 9000/udp
+EXPOSE 8888/udp
 USER nonroot
 ENTRYPOINT ["/usr/local/bin/streamsockets-client"]

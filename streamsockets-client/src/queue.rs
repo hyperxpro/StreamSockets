@@ -82,8 +82,8 @@ mod tests {
         let dropped = q.push(Bytes::from_static(b"klmno")); // would be 15
         assert_eq!(dropped, 1);
         assert_eq!(q.len_bytes(), 10);
-        assert_eq!(q.pop_front().unwrap(), Bytes::from_static(b"fghij"));
-        assert_eq!(q.pop_front().unwrap(), Bytes::from_static(b"klmno"));
+        assert_eq!(q.pop_front().expect("test"), Bytes::from_static(b"fghij"));
+        assert_eq!(q.pop_front().expect("test"), Bytes::from_static(b"klmno"));
     }
 
     #[test]

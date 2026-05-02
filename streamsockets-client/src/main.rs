@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = Arc::new(ClientConfig::from_env());
     if let Err(e) = cfg.validate() {
-        eprintln!("configuration error: {e}");
+        tracing::error!("configuration error: {e}");
         std::process::exit(2);
     }
     init_shared(&cfg);

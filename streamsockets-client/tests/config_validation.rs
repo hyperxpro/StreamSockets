@@ -100,7 +100,8 @@ fn max_frame_size_below_floor_rejected() {
 #[test]
 fn max_frame_size_above_ceiling_rejected() {
     let mut c = base_cfg();
-    c.max_frame_size = 65_536;
+    // The ceiling is 65536 (the spec default); 65537 is the first rejected value.
+    c.max_frame_size = 65_537;
     assert!(matches!(c.validate(), Err(ConfigError::Invalid(_))));
 }
 

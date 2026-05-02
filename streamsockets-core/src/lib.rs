@@ -451,10 +451,7 @@ fn sd_notify_inner(msg: &str) {
     if let Err(e) = write(&fd, msg.as_bytes()) {
         // A failed write of READY=1 will cause systemd's WatchdogSec timer to
         // SIGKILL the process. Log loudly so this is investigatable.
-        tracing::warn!(
-            message = msg.trim_end(),
-            "sd_notify: write failed: {e}"
-        );
+        tracing::warn!(message = msg.trim_end(), "sd_notify: write failed: {e}");
     }
     drop(fd);
 }

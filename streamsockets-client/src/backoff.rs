@@ -92,8 +92,8 @@ mod tests {
         }
 
         // (a) Strict bounds.
-        let min = *samples.iter().min().unwrap();
-        let max = *samples.iter().max().unwrap();
+        let min = *samples.iter().min().expect("test");
+        let max = *samples.iter().max().expect("test");
         assert!(min >= base, "min < base: {min}");
         assert!(max <= cap, "max > cap: {max}");
 

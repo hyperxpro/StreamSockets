@@ -224,7 +224,7 @@ mod tests {
         })
         .expect("spawn_per_core");
         for h in handles {
-            h.join().unwrap();
+            h.join().expect("test");
         }
         // 1 + 2 + 3
         assert_eq!(counter.load(Ordering::Relaxed), 6);

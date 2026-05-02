@@ -25,6 +25,20 @@ fn main() -> anyhow::Result<()> {
     init_tracing();
     install_panic_hook();
 
+    // TOKIO_CONSOLE_BIND (MIGRATION.md §10.1): if set, the operator wants the
+    // tokio-console subscriber bound for live task introspection. The current
+    // build does not link `console-subscriber` (heavy dep, deferred to v2.1).
+    // Surface a warn so the misconfiguration is visible at startup rather
+    // than silent.
+    if let Some(bind) = std::env::var_os("TOKIO_CONSOLE_BIND") {
+        tracing::warn!(
+            value = %bind.to_string_lossy(),
+            "TOKIO_CONSOLE_BIND is set but this build does not include console-subscriber; \
+             ignoring. Rebuild with --features tokio-console once the v2.1 console-subscriber \
+             integration ships."
+        );
+    }
+
     let cfg = Arc::new(ServerConfig::from_env());
 
     // PARENT_THREADS controls the number of accept-loop workers. CHILD_THREADS
