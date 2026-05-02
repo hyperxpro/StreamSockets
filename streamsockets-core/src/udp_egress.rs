@@ -19,10 +19,13 @@ use smallvec::SmallVec;
 
 use crate::buf_pool::{BufHandle, BufPool};
 
-/// Up to 16 segments returned by a single recv. Real GRO fan-out is typically
-/// well below this; the SmallVec keeps the steady-state allocation count at
-/// zero.
-pub type SegmentList = SmallVec<[(usize, usize); 16]>;
+/// Up to 64 segments returned by a single recv. UDP_GRO can coalesce up to
+/// ~43 MTU-sized datagrams into one 64 KiB recv (64 KiB / 1500); 64 leaves
+/// headroom for jumbo / non-Ethernet links. `(u16, u16)` is exact — UDP
+/// datagrams are bounded by the IP layer to 65535 bytes — saves 16 B per
+/// slot vs `(usize, usize)` on 64-bit, keeping the inline footprint at
+/// 256 B (0.0625 KiB) which fits in two cache lines.
+pub type SegmentList = SmallVec<[(u16, u16); 64]>;
 
 /// One UDP recv yielding zero or more datagrams.
 ///
@@ -42,13 +45,15 @@ impl RecvBatch {
     #[must_use]
     pub fn segment(&self, i: usize) -> &[u8] {
         let (off, len) = self.segments[i];
+        let off = off as usize;
+        let len = len as usize;
         &self.buf.as_ref()[off..off + len]
     }
 
     /// Total payload bytes across all segments.
     #[must_use]
     pub fn total_bytes(&self) -> usize {
-        self.segments.iter().map(|(_, l)| *l).sum()
+        self.segments.iter().map(|(_, l)| *l as usize).sum()
     }
 
     /// Number of segments in this batch.
@@ -91,6 +96,12 @@ pub struct TokioUdp {
     /// Whether `UDP_GRO` setsockopt has been accepted on this socket. Enables
     /// the cmsg-parsing recv path.
     gro_enabled: bool,
+    /// Recycled cmsg control-buffer for both the GRO path and the non-GRO
+    /// `recvmsg(MSG_TRUNC)` path on Linux. Pre-sized to
+    /// [`crate::gro::CMSG_BUF_SIZE`] at construction so the hot path never
+    /// allocates and never trips MSG_CTRUNC under the documented cmsg set.
+    #[cfg(target_os = "linux")]
+    cmsg_buf: Vec<u8>,
 }
 
 impl TokioUdp {
@@ -102,6 +113,8 @@ impl TokioUdp {
         Self {
             socket,
             gro_enabled: false,
+            #[cfg(target_os = "linux")]
+            cmsg_buf: Vec::with_capacity(crate::gro::CMSG_BUF_SIZE),
         }
     }
 
@@ -155,22 +168,38 @@ impl UdpEgress for TokioUdp {
             // recvmsg_gro passes MSG_DONTWAIT so it surfaces WouldBlock cleanly.
             loop {
                 self.socket.readable().await?;
-                match crate::gro::recvmsg_gro(self.socket.as_fd(), buf.as_mut()) {
-                    Ok((n, seg_size)) => {
+                match crate::gro::recvmsg_gro(self.socket.as_fd(), buf.as_mut(), &mut self.cmsg_buf)
+                {
+                    Ok(r) => {
+                        if r.truncated {
+                            // Surfacing Err is deliberate: silent truncation
+                            // violates the tunnel's "no truncation" guarantee
+                            // (spec §7.1). Callers map this to a counter +
+                            // close 1009 ("Message Too Big").
+                            let buf_len = buf.as_ref().len();
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                TruncatedRecv {
+                                    wire_len: r.wire_len,
+                                    buf_len,
+                                },
+                            ));
+                        }
+                        let n = r.bytes_in_buf;
                         let mut segments = SegmentList::new();
-                        match seg_size {
+                        match r.seg_size {
                             Some(seg) if seg > 0 && (seg as usize) < n => {
                                 // Coalesced. Split into seg_size chunks; last is tail.
                                 let seg = seg as usize;
                                 let mut off = 0;
                                 while off < n {
                                     let take = (n - off).min(seg);
-                                    segments.push((off, take));
+                                    segments.push((to_u16(off), to_u16(take)));
                                     off += take;
                                 }
                             }
                             _ => {
-                                segments.push((0, n));
+                                segments.push((0, to_u16(n)));
                             }
                         }
                         return Ok(RecvBatch { buf, segments });
@@ -181,10 +210,113 @@ impl UdpEgress for TokioUdp {
             }
         }
 
-        let n = self.socket.recv(buf.as_mut()).await?;
-        let mut segments = SegmentList::new();
-        segments.push((0, n));
-        Ok(RecvBatch { buf, segments })
+        // Non-GRO path. tokio::net::UdpSocket::recv calls plain recv(2) which
+        // does NOT pass MSG_TRUNC, so >buf datagrams get silently chopped. We
+        // cannot accept that — silent truncation corrupts WS frames downstream.
+        // On Linux we go through nix recvmsg(MSG_TRUNC) to learn the wire size;
+        // on non-Linux (dev-only) we fall back to tokio's recv (best effort).
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::IoSliceMut;
+            use std::os::fd::AsFd;
+            use std::os::fd::AsRawFd;
+            loop {
+                self.socket.readable().await?;
+                let buf_len = buf.as_ref().len();
+                self.cmsg_buf.clear();
+                if self.cmsg_buf.capacity() < crate::gro::CMSG_BUF_SIZE {
+                    let need = crate::gro::CMSG_BUF_SIZE - self.cmsg_buf.capacity();
+                    self.cmsg_buf.reserve(need);
+                }
+                let mut iov = [IoSliceMut::new(buf.as_mut())];
+                let res = nix::sys::socket::recvmsg::<()>(
+                    self.socket.as_fd().as_raw_fd(),
+                    &mut iov,
+                    Some(&mut self.cmsg_buf),
+                    nix::sys::socket::MsgFlags::MSG_DONTWAIT
+                        | nix::sys::socket::MsgFlags::MSG_TRUNC,
+                );
+                match res {
+                    Ok(msg) => {
+                        let wire_len = msg.bytes;
+                        if wire_len > buf_len {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                TruncatedRecv { wire_len, buf_len },
+                            ));
+                        }
+                        let mut segments = SegmentList::new();
+                        segments.push((0, to_u16(wire_len)));
+                        return Ok(RecvBatch { buf, segments });
+                    }
+                    Err(nix::errno::Errno::EAGAIN) => continue,
+                    Err(errno) => return Err(io::Error::from_raw_os_error(errno as i32)),
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let n = self.socket.recv(buf.as_mut()).await?;
+            let mut segments = SegmentList::new();
+            segments.push((0, to_u16(n)));
+            Ok(RecvBatch { buf, segments })
+        }
+    }
+}
+
+/// UDP datagrams cap at 65535 bytes; segment lengths fit in u16. Saturating
+/// cast catches the impossible-but-defensive "wire_len > 65535" path.
+#[inline]
+fn to_u16(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// Sidecar payload for the `io::Error` returned when the kernel reported
+/// MSG_TRUNC (or the non-GRO recvmsg observed `wire_len > buf_len`). Callers
+/// can downcast via [`classify_io_error`] for structured handling (close code
+/// 1009, metric bump, etc).
+#[derive(Debug)]
+pub struct TruncatedRecv {
+    /// Real datagram length on the wire (always > `buf_len`).
+    pub wire_len: usize,
+    /// Length of the recv buffer that the kernel chopped the datagram to.
+    pub buf_len: usize,
+}
+
+impl std::fmt::Display for TruncatedRecv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "udp recv truncated: wire={} buf={}",
+            self.wire_len, self.buf_len
+        )
+    }
+}
+
+impl std::error::Error for TruncatedRecv {}
+
+/// Coarse classification of an `io::Error` returned by [`UdpEgress::recv_segments`].
+/// Lets crates that don't depend on `streamsockets-core`'s private types check
+/// for truncation without `Box<dyn Error>` downcasts at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// The recv saw a datagram larger than the buffer. Caller should bump a
+    /// `udp_truncated_total` counter and (on the WS path) close with 1009.
+    Truncated,
+    /// Anything else.
+    Other,
+}
+
+/// Classify an `io::Error` from a recv path. See [`ErrorClass`].
+#[must_use]
+pub fn classify_io_error(e: &io::Error) -> ErrorClass {
+    if e.get_ref()
+        .and_then(|inner| inner.downcast_ref::<TruncatedRecv>())
+        .is_some()
+    {
+        ErrorClass::Truncated
+    } else {
+        ErrorClass::Other
     }
 }
 
@@ -217,5 +349,39 @@ mod tests {
         // Result is Ok regardless: true on kernel ≥ 5.0, false on older.
         let r = udp.try_enable_gro();
         assert!(r.is_ok(), "unexpected GRO setsockopt error: {r:?}");
+    }
+
+    /// Non-GRO path: a datagram larger than the recv buffer returns Err with
+    /// a TruncatedRecv payload, classified as ErrorClass::Truncated.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn tokio_udp_non_gro_truncation_surfaces() {
+        let a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        a.connect(b.local_addr().unwrap()).await.unwrap();
+        b.connect(a.local_addr().unwrap()).await.unwrap();
+
+        let mut receiver = TokioUdp::from_socket(Arc::new(a));
+        // Pool buffers are 64B; we send 2000B → wire_len > buf_len.
+        let pool = BufPool::new(4, 64);
+        b.send(&vec![0xAB; 2000]).await.unwrap();
+
+        let err = match receiver.recv_segments(&pool).await {
+            Ok(_) => panic!("expected truncation error"),
+            Err(e) => e,
+        };
+        assert_eq!(classify_io_error(&err), ErrorClass::Truncated);
+        let inner = err
+            .get_ref()
+            .and_then(|i| i.downcast_ref::<TruncatedRecv>())
+            .expect("TruncatedRecv payload");
+        assert_eq!(inner.wire_len, 2000);
+        assert_eq!(inner.buf_len, 64);
+    }
+
+    #[test]
+    fn classify_io_error_default_is_other() {
+        let e = io::Error::from(io::ErrorKind::WouldBlock);
+        assert_eq!(classify_io_error(&e), ErrorClass::Other);
     }
 }

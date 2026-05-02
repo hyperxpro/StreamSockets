@@ -24,7 +24,6 @@ async fn echo_through_tunnel() {
 
     let _server =
         common::spawn_server(server_port, accounts.path().to_path_buf(), metrics_port).await;
-    common::settle(Duration::from_millis(200)).await;
 
     let cfg = common::default_client_cfg(server_port, client_udp_port, echo_port);
     let (_client, _shutdown) = common::spawn_client(cfg).await;
@@ -45,17 +44,26 @@ async fn echo_through_tunnel() {
         let payload = format!("hello-{i}");
         game.send_to(payload.as_bytes(), target).await.unwrap();
         let mut buf = [0u8; 64];
+        // Failing fast on a recv timeout (rather than swallowing it via
+        // `_ => {}`) ensures a regression that hangs N receives surfaces
+        // immediately instead of degrading the threshold from 99/100 to 0/100
+        // silently.
         match tokio::time::timeout(Duration::from_secs(2), game.recv_from(&mut buf)).await {
             Ok(Ok((n, _peer))) => {
                 let echoed = std::str::from_utf8(&buf[..n]).unwrap();
                 assert_eq!(echoed, payload);
                 received += 1;
             }
-            _ => {}
+            Ok(Err(e)) => panic!("recv error for echo {i}: {e}"),
+            Err(_) => {
+                panic!("recv timeout for echo {i} (sent {payload}, received {received} so far)")
+            }
         }
     }
-    assert!(
-        received >= 99,
-        "expected ≥99 echoes out of 100 (post-warmup), got {received}"
+    // Panic-on-first-timeout above means received==100 by construction.
+    // Keep belt-and-braces in case the panic is ever softened back to a count.
+    assert_eq!(
+        received, 100,
+        "expected 100 echoes out of 100 (post-warmup), got {received}"
     );
 }

@@ -52,7 +52,6 @@ async fn route_denied_403() {
     let accounts = common::write_accounts(&yaml);
     let _server =
         common::spawn_server(server_port, accounts.path().to_path_buf(), metrics_port).await;
-    common::settle(Duration::from_millis(150)).await;
 
     let status = raw_handshake(server_port, "secret-token", "127.0.0.1", "9999").await;
     assert_eq!(status, 403, "route not in allowlist must be 403");
@@ -78,7 +77,6 @@ accounts:
     let accounts = common::write_accounts(&yaml);
     let _server =
         common::spawn_server(server_port, accounts.path().to_path_buf(), metrics_port).await;
-    common::settle(Duration::from_millis(150)).await;
 
     let status = raw_handshake(server_port, "tok", "127.0.0.1", "8888").await;
     assert_eq!(status, 403, "loopback IP outside allowlist must be 403");
@@ -94,18 +92,36 @@ async fn reuse_conflict_409() {
     let accounts = common::write_accounts(&yaml);
     let _server =
         common::spawn_server(server_port, accounts.path().to_path_buf(), metrics_port).await;
-    common::settle(Duration::from_millis(150)).await;
 
     // Spawn a long-lived client to grab the lease.
     let client_udp_port = common::free_udp_port().await;
     let cfg = common::default_client_cfg(server_port, client_udp_port, echo_port);
     let _client = common::spawn_client(cfg).await;
 
+    // Wait for the metrics endpoint so we can probe lease acquisition.
+    common::wait_for_metrics_ready(metrics_port, Duration::from_secs(5))
+        .await
+        .expect("metrics ready");
+
     // Send one UDP packet so the client transitions to Live and acquires the lease.
     let game = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let target: std::net::SocketAddr = format!("127.0.0.1:{client_udp_port}").parse().unwrap();
     let _ = game.send_to(b"prime", target).await;
-    common::settle(Duration::from_millis(500)).await;
+
+    // Replace the 500ms hardcoded sleep with a metrics readiness probe:
+    // poll until `streamsockets_active_tunnels >= 1` so the lease is held
+    // before we attempt the conflicting handshake. Without this, the
+    // raw_handshake races the lease acquisition and intermittently sees
+    // 101 instead of 409.
+    common::wait_for_metric_at_least(
+        metrics_port,
+        "streamsockets_active_tunnels",
+        &[],
+        1.0,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("active_tunnels never reached 1 — lease was not acquired");
 
     // Second handshake with the same token should hit 409.
     let status = raw_handshake(
@@ -128,7 +144,6 @@ async fn happy_path_101() {
     let accounts = common::write_accounts(&yaml);
     let _server =
         common::spawn_server(server_port, accounts.path().to_path_buf(), metrics_port).await;
-    common::settle(Duration::from_millis(150)).await;
 
     let status = raw_handshake(
         server_port,

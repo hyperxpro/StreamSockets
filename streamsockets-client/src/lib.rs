@@ -65,13 +65,13 @@ pub mod ws;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use streamsockets_core::{env_bool, env_opt, env_value, env_value_as_int, env_value_as_u64};
+use streamsockets_core::{env_bool, env_value, env_value_as_int, env_value_as_u64};
 
 /// String wrapper whose `Debug` prints `<redacted>` instead of bytes. Cheap
 /// (`Clone` is `String::clone`); deliberately does NOT zero memory on drop —
 /// for that level of paranoia an operator should set `MEMORY_DENY_WRITE_EXECUTE`
-/// + page-locked allocator. The goal here is preventing accidental log leak
-/// via `tracing::info!(?cfg, ...)`.
+/// + page-locked allocator and bring in `zeroize`. The goal here is preventing
+/// accidental log leak via `tracing::info!(?cfg, ...)`.
 #[derive(Clone)]
 pub struct RedactedString(String);
 
@@ -82,6 +82,9 @@ impl RedactedString {
     pub fn expose(&self) -> &str {
         &self.0
     }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl std::fmt::Debug for RedactedString {
@@ -89,6 +92,17 @@ impl std::fmt::Debug for RedactedString {
         f.write_str("<redacted>")
     }
 }
+
+impl PartialEq for RedactedString {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        let a = self.0.as_bytes();
+        let b = other.0.as_bytes();
+        a.len() == b.len() && bool::from(a.ct_eq(b))
+    }
+}
+
+impl Eq for RedactedString {}
 
 impl From<String> for RedactedString {
     fn from(s: String) -> Self {
@@ -128,6 +142,16 @@ pub struct ClientConfig {
     /// Inflight UDP-listener channel cap (frames). Per-frame size bounded by
     /// `max_frame_size`; total in-flight memory ≤ `udp_channel_capacity * max_frame_size`.
     pub udp_channel_capacity: usize,
+    /// Per-process opt-out for the ws:// + AUTH_TOKEN startup refusal.
+    /// Set `ALLOW_INSECURE_AUTH=true` to allow plaintext token transmission.
+    pub allow_insecure_auth: bool,
+    /// Per-process opt-out for the empty-AUTH_TOKEN startup refusal.
+    /// Set `ALLOW_NO_AUTH=true` to run without an auth token.
+    pub allow_no_auth: bool,
+    /// Currently unused. Root store is loaded from the OS via
+    /// `rustls-platform-verifier`. Retained as an explicit `None` so
+    /// downstream consumers (testsuite) can construct `ClientConfig`
+    /// literally; wiring a PEM file as additional roots is a future change.
     #[allow(dead_code)]
     pub tls_ca_file: Option<PathBuf>,
 }
@@ -153,6 +177,8 @@ impl std::fmt::Debug for ClientConfig {
             .field("threads", &self.threads)
             .field("max_frame_size", &self.max_frame_size)
             .field("udp_channel_capacity", &self.udp_channel_capacity)
+            .field("allow_insecure_auth", &self.allow_insecure_auth)
+            .field("allow_no_auth", &self.allow_no_auth)
             .field("tls_ca_file", &self.tls_ca_file)
             .finish()
     }
@@ -192,10 +218,95 @@ impl ClientConfig {
             queue_max_bytes: env_value_as_u64("QUEUE_MAX_BYTES", 1_048_576),
             queue_drain_timeout_ms: env_value_as_u64("QUEUE_DRAIN_TIMEOUT_MS", 30_000),
             threads: env_value_as_int("THREADS", default_threads as i64) as u32,
-            max_frame_size: env_value_as_int("MAX_FRAME_SIZE", 65536) as usize,
+            max_frame_size: env_value_as_int("MAX_FRAME_SIZE", 65535) as usize,
             udp_channel_capacity: env_value_as_int("UDP_CHANNEL_CAPACITY", 1024) as usize,
-            tls_ca_file: env_opt("TLS_CA_FILE").map(PathBuf::from),
+            allow_insecure_auth: env_bool("ALLOW_INSECURE_AUTH", false),
+            allow_no_auth: env_bool("ALLOW_NO_AUTH", false),
+            tls_ca_file: None,
         }
+    }
+
+    /// Validate operator-provided configuration. Returns an error describing
+    /// the first invariant violation. Called from `main.rs` *before* worker
+    /// spawn so misconfiguration fails fast at startup, not on first dial.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        // (Fix #9) THREADS bound.
+        if self.threads == 0 {
+            return Err(ConfigError::Invalid("THREADS must be >= 1".into()));
+        }
+        if self.threads > 256 {
+            return Err(ConfigError::Invalid(format!(
+                "THREADS={} exceeds cap of 256",
+                self.threads
+            )));
+        }
+        // (Fix #10) MAX_FRAME_SIZE bound: Ethernet MTU floor, u16 ceiling.
+        if self.max_frame_size < 1500 {
+            return Err(ConfigError::Invalid(format!(
+                "MAX_FRAME_SIZE={} below Ethernet MTU floor (1500)",
+                self.max_frame_size
+            )));
+        }
+        if self.max_frame_size > 65535 {
+            return Err(ConfigError::Invalid(format!(
+                "MAX_FRAME_SIZE={} exceeds u16 max (65535)",
+                self.max_frame_size
+            )));
+        }
+        // (Fix #7) Strict ROUTE parser.
+        let (_, route_port) = parse_route_strict(&self.route)
+            .ok_or_else(|| ConfigError::Invalid(format!("invalid ROUTE: {}", self.route)))?;
+        if route_port == 0 {
+            return Err(ConfigError::Invalid("ROUTE port must be non-zero".into()));
+        }
+        // Parse the websocket URI once for the remaining checks.
+        let url = url::Url::parse(&self.websocket_uri)
+            .map_err(|e| ConfigError::Invalid(format!("invalid WEBSOCKET_URI: {e}")))?;
+        let scheme = url.scheme();
+        let use_tls = match scheme {
+            "ws" => false,
+            "wss" => true,
+            other => {
+                return Err(ConfigError::Invalid(format!(
+                    "unsupported WEBSOCKET_URI scheme: {other}"
+                )));
+            }
+        };
+        let host = url
+            .host_str()
+            .ok_or_else(|| ConfigError::Invalid("WEBSOCKET_URI missing host".into()))?;
+        // (Fix #17) :0 is never valid for an outbound dial.
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| ConfigError::Invalid("WEBSOCKET_URI missing port".into()))?;
+        if port == 0 {
+            return Err(ConfigError::Invalid(
+                "WEBSOCKET_URI port must be non-zero".into(),
+            ));
+        }
+        // (Fix #14) wss:// to a literal IP — `url` strips brackets from
+        // host_str so detect via parse::<IpAddr>(). The TLS handshake
+        // will use ServerName::IpAddress; this only validates the host
+        // is something the rustls verifier can consume.
+        if use_tls {
+            // ServerName::try_from already accepts an IP literal, but bracket
+            // forms like "[::1]" would slip through `url` only if a future
+            // url-crate change stops stripping; reject defensively.
+            if host.starts_with('[') || host.ends_with(']') {
+                return Err(ConfigError::Invalid(format!(
+                    "WEBSOCKET_URI host {host:?} contains brackets after URL parse"
+                )));
+            }
+        }
+        // (Fix #1) Plaintext token over ws:// — refuse unless explicit opt-out.
+        if !use_tls && !self.auth_token.is_empty() && !self.allow_insecure_auth {
+            return Err(ConfigError::InsecureScheme);
+        }
+        // (Fix #8) Empty token — refuse unless explicit opt-out.
+        if self.auth_token.is_empty() && !self.allow_no_auth {
+            return Err(ConfigError::MissingAuthToken);
+        }
+        Ok(())
     }
 
     /// Returns the route's host portion. Strips IPv6 brackets so the result is
@@ -230,23 +341,55 @@ impl ClientConfig {
     }
 }
 
-/// Parse a `ROUTE` string of the form `host:port` or `[ipv6]:port`. Returns
-/// `(address_without_brackets, port)`. Used by both the client (to populate
-/// `X-Route-Address`) and the server (to validate the header). Stripping the
-/// brackets here means downstream `IpAddr::parse(addr)` works for IPv6 literals.
+/// Configuration validation errors surfaced at startup before any worker spawns.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error(
+        "WEBSOCKET_URI is ws:// (plaintext) but AUTH_TOKEN is non-empty; refusing to send the token in cleartext. \
+         Either switch to wss:// or set ALLOW_INSECURE_AUTH=true to acknowledge the risk."
+    )]
+    InsecureScheme,
+    #[error(
+        "AUTH_TOKEN is empty; refusing to start. Set AUTH_TOKEN=<token> or set ALLOW_NO_AUTH=true to opt out."
+    )]
+    MissingAuthToken,
+    #[error("invalid configuration: {0}")]
+    Invalid(String),
+}
+
+/// Strict ROUTE parser. Accepts:
+///   - `host:port` where host has no embedded `:` (IPv4 literal or DNS name)
+///   - `[ipv6-literal]:port`
+/// Rejects unbracketed IPv6 literals such as `::1:8888`, which the previous
+/// `rsplit_once(':')` parser silently corrupted: `("::1", 8888)` looks like an
+/// IPv6 host but the kernel routing path treats `::1` as a v6 address while
+/// the actual operator intent could have been `[::1]:8888` *or* a typo of a
+/// hostname. Refuse the ambiguity.
 pub fn parse_route(s: &str) -> Option<(&str, u16)> {
+    parse_route_strict(s)
+}
+
+fn parse_route_strict(s: &str) -> Option<(&str, u16)> {
     let s = s.trim();
     if let Some(rest) = s.strip_prefix('[') {
         // Bracketed IPv6 literal: `[::1]:8888`.
         let (addr, tail) = rest.split_once(']')?;
         let port_str = tail.strip_prefix(':')?;
         let port: u16 = port_str.parse().ok()?;
-        Some((addr, port))
-    } else {
-        let (addr, port_str) = s.rsplit_once(':')?;
-        let port: u16 = port_str.parse().ok()?;
-        Some((addr, port))
+        // Verify the bracketed body is a real IPv6 literal.
+        addr.parse::<std::net::Ipv6Addr>().ok()?;
+        return Some((addr, port));
     }
+    // Unbracketed: at most one `:` allowed (IPv4 literal or DNS name).
+    if s.matches(':').count() > 1 {
+        return None;
+    }
+    let (addr, port_str) = s.rsplit_once(':')?;
+    if addr.is_empty() {
+        return None;
+    }
+    let port: u16 = port_str.parse().ok()?;
+    Some((addr, port))
 }
 
 /// Build a UDP listener with SO_REUSEPORT (Linux/BSD) and SO_REUSEADDR set,
@@ -340,9 +483,18 @@ pub fn init_shared(cfg: &ClientConfig) {
     );
 
     // Warn-and-ignore the removed v1 env var; see docs/v2.md §7.1.
-    let _ignored = std::env::var("USE_OLD_PROTOCOL").map(|_| {
+    if std::env::var_os("USE_OLD_PROTOCOL").is_some() {
         warn!("USE_OLD_PROTOCOL is set but ignored — v2 client only speaks v2");
-    });
+    }
+    if cfg.allow_insecure_auth {
+        warn!(
+            "ALLOW_INSECURE_AUTH=true: AUTH_TOKEN will be sent in cleartext over ws://. \
+             Use wss:// in production."
+        );
+    }
+    if cfg.allow_no_auth && cfg.auth_token.is_empty() {
+        warn!("ALLOW_NO_AUTH=true: starting client without an AUTH_TOKEN");
+    }
 
     if cfg.client_ip_header_warning_applies() {
         warn!(

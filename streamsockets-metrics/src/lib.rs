@@ -40,12 +40,13 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use http::{Request, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use once_cell::sync::OnceCell;
 use prometheus::{
     register_counter_vec_with_registry, register_counter_with_registry,
@@ -54,7 +55,8 @@ use prometheus::{
     HistogramOpts, HistogramVec, Opts, Registry, TextEncoder,
 };
 use tokio::net::TcpListener;
-use tracing::{error, info, warn};
+use tokio::sync::Semaphore;
+use tracing::{debug, info, warn};
 
 /// Global metrics registry. Single instance per process — matches Java singleton.
 #[allow(missing_docs)] // each field maps 1:1 to a spec'd metric; names are self-documenting
@@ -86,6 +88,8 @@ pub struct Metrics {
     pub upstream_connect_failures: Counter,
     pub upstream_unreachable: Counter,
     pub upstream_send_drops: Counter,
+    pub downstream_queue_drops: Counter,
+    pub upstream_truncated: Counter,
     pub queue_depth_bytes: GaugeVec,
     pub queue_dropped: CounterVec,
     pub queue_purged: CounterVec,
@@ -125,6 +129,8 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
     "streamsockets_upstream_connect_failures_total",
     "streamsockets_upstream_unreachable_total",
     "streamsockets_upstream_send_drops_total",
+    "streamsockets_downstream_queue_drops_total",
+    "streamsockets_upstream_truncated_total",
     "streamsockets_queue_depth_bytes",
     "streamsockets_queue_dropped_total",
     "streamsockets_queue_purged_total",
@@ -194,8 +200,15 @@ impl Metrics {
                 "streamsockets_connection_duration_seconds",
                 "Connection duration in seconds by account",
             )
+            // Spec §9.1 buckets (1s..3600s) extended in v2.0.0 with longer
+            // tails (2h, 6h, 24h) so the +Inf bucket isn't the only signal
+            // for the long-lived tunnel population. These are additive and
+            // do not move existing quantiles.
+            // Sub-second buckets prepended so failure-mid-handshake / fast-reject
+            // populations don't all collapse into `le=1`.
             .buckets(vec![
-                1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0
+                0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0,
+                21600.0, 86400.0,
             ]),
             &["account_name"],
             registry
@@ -268,8 +281,11 @@ impl Metrics {
                 "streamsockets_ping_rtt_seconds",
                 "Ping/pong round-trip time in seconds",
             )
+            // Sub-millisecond buckets prepended so LAN/intra-DC RTT (typically
+            // 100–500 µs) is observable below the historical 1 ms floor.
             .buckets(vec![
-                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                0.0001, 0.00025, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+                5.0,
             ]),
             &["account_name"],
             registry
@@ -314,6 +330,18 @@ impl Metrics {
         let upstream_send_drops = register_counter_with_registry!(
             "streamsockets_upstream_send_drops_total",
             "UDP send drops (EAGAIN/ENOBUFS)",
+            registry
+        )
+        .expect("static metric registration is infallible");
+        let downstream_queue_drops = register_counter_with_registry!(
+            "streamsockets_downstream_queue_drops_total",
+            "Frames dropped due to bounded downstream queue full (slow client)",
+            registry
+        )
+        .expect("static metric registration is infallible");
+        let upstream_truncated = register_counter_with_registry!(
+            "streamsockets_upstream_truncated_total",
+            "Upstream UDP datagrams that filled the recv buffer (likely truncated)",
             registry
         )
         .expect("static metric registration is infallible");
@@ -412,6 +440,8 @@ impl Metrics {
             upstream_connect_failures,
             upstream_unreachable,
             upstream_send_drops,
+            downstream_queue_drops,
+            upstream_truncated,
             queue_depth_bytes,
             queue_dropped,
             queue_purged,
@@ -454,6 +484,10 @@ impl Metrics {
     }
 
     /// Increment `bytes_received_total` for `account`.
+    ///
+    /// `bytes` is converted to `f64` for the Prometheus counter; values above
+    /// 2^53 (~9 PiB) lose precision. Not a concern at human timescales — at
+    /// 10 Gbps it would take ~230 years to roll past 2^53 bytes.
     pub fn record_bytes_received(&self, account: &str, bytes: u64) {
         self.bytes_received
             .with_label_values(&[account])
@@ -461,6 +495,9 @@ impl Metrics {
     }
 
     /// Increment `bytes_sent_total` for `account`.
+    ///
+    /// `bytes` is converted to `f64` for the Prometheus counter; values above
+    /// 2^53 (~9 PiB) lose precision. See `record_bytes_received` for context.
     pub fn record_bytes_sent(&self, account: &str, bytes: u64) {
         self.bytes_sent
             .with_label_values(&[account])
@@ -468,13 +505,16 @@ impl Metrics {
     }
 
     /// Encode the registry to Prometheus text format.
-    pub fn encode_text(&self) -> Vec<u8> {
+    ///
+    /// Returns the encoded buffer on success, or the underlying
+    /// `prometheus::Error` on encode failure (e.g. an internal mutex was
+    /// poisoned). Callers that serve this over HTTP MUST translate `Err` to a
+    /// 500; serving a partial body would silently corrupt scrape data.
+    pub fn encode_text(&self) -> Result<Vec<u8>, prometheus::Error> {
         let encoder = TextEncoder::new();
         let mut buf = Vec::new();
-        if let Err(e) = encoder.encode(&self.registry.gather(), &mut buf) {
-            error!("encode failed: {e}");
-        }
-        buf
+        encoder.encode(&self.registry.gather(), &mut buf)?;
+        Ok(buf)
     }
 }
 
@@ -502,51 +542,126 @@ impl HealthState {
 
     /// Flip `ready` true. Caller (server `run()`) calls this *after* the
     /// public TCP listener is bound and accept-looping.
+    ///
+    /// `Release` is sufficient here — the flag is not paired with other
+    /// shared state we need to publish atomically; readers (`is_ready`) only
+    /// need to observe the flip itself, which `Acquire` guarantees once
+    /// `Release` lands.
     pub fn mark_ready(&self) {
-        self.ready.store(true, Ordering::SeqCst);
+        self.ready.store(true, Ordering::Release);
     }
 
     /// Flip `draining` true. Caller (server SIGTERM handler) calls this
     /// before broadcasting graceful shutdown.
+    ///
+    /// `Release` is sufficient: see `mark_ready` for rationale.
     pub fn mark_draining(&self) {
-        self.draining.store(true, Ordering::SeqCst);
+        self.draining.store(true, Ordering::Release);
     }
 
     /// True after a `mark_draining` call.
     #[must_use]
     pub fn is_draining(&self) -> bool {
-        self.draining.load(Ordering::SeqCst)
+        self.draining.load(Ordering::Acquire)
     }
 
     /// True after a `mark_ready` call.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::SeqCst)
+        self.ready.load(Ordering::Acquire)
     }
+
+    /// Returns a coarse readiness state for operator-facing diagnostics
+    /// (used by `/readyz` to distinguish "draining" from "not yet ready").
+    #[must_use]
+    pub fn state(&self) -> HealthSnapshot {
+        // Load draining first: a node that is both ready+draining should be
+        // reported as draining (terminal state for shutdown). Acquire orders
+        // both loads against the corresponding Release stores.
+        let draining = self.draining.load(Ordering::Acquire);
+        let ready = self.ready.load(Ordering::Acquire);
+        if draining {
+            HealthSnapshot::Draining
+        } else if ready {
+            HealthSnapshot::Ready
+        } else {
+            HealthSnapshot::NotReady
+        }
+    }
+}
+
+/// Coarse health snapshot, used by `/readyz` to distinguish "still warming
+/// up" from "shutting down" for operator triage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthSnapshot {
+    /// Service has not yet marked itself ready.
+    NotReady,
+    /// Service is ready and not draining.
+    Ready,
+    /// Service is draining (terminal state for graceful shutdown).
+    Draining,
+}
+
+/// Maximum concurrent metrics scrapes. Prometheus typically opens 1-2
+/// connections to each /metrics endpoint; 8 is comfortable headroom and a
+/// hard ceiling against a noisy or buggy scraper that opens many sockets.
+const MAX_CONCURRENT_SCRAPES: usize = 8;
+
+/// Per-connection wall-clock cap on `serve_connection`. Slow-loris guard.
+const PER_CONN_DEADLINE: Duration = Duration::from_secs(30);
+
+/// HTTP/1 header read timeout. A scraper that doesn't transmit a complete
+/// request line + headers in this window is dropped. Hyper requires a
+/// `Timer` to be installed for this to take effect.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reject a non-loopback bind unless the operator opted in.
+///
+/// Loopback ⇔ `127.0.0.0/8` (`Ipv4Addr::is_loopback`) or `::1`. Anything else
+/// (including `0.0.0.0` and routable addresses) requires `bind_all = true`.
+/// Defense in depth: callers in `streamsockets-server` already gate on
+/// `METRICS_BIND_ALL`, but a misconfigured embedder could still pass a
+/// wildcard `SocketAddr` directly — this check stops that.
+fn check_bind_policy(addr: SocketAddr, bind_all: bool) -> std::io::Result<()> {
+    if bind_all || addr.ip().is_loopback() {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "metrics_bind_all=false but non-loopback bind requested",
+    ))
 }
 
 /// Run the metrics HTTP service indefinitely.
 ///
 /// Blocks the calling task; `serve_metrics_with_cancel` is the variant taking
 /// a [`tokio_util::sync::CancellationToken`] for graceful shutdown.
+///
+/// `bind_all` must be `true` to bind a non-loopback address. The default in
+/// every caller is `false`; see `check_bind_policy` for the rationale.
 pub async fn serve_metrics(
     addr: SocketAddr,
     metrics: Arc<Metrics>,
     health: Arc<HealthState>,
     metrics_path: String,
+    bind_all: bool,
 ) -> std::io::Result<()> {
-    serve_metrics_with_cancel(addr, metrics, health, metrics_path, None).await
+    serve_metrics_with_cancel(addr, metrics, health, metrics_path, bind_all, None).await
 }
 
 /// Spawn the metrics HTTP service. If a cancellation token is provided, the
 /// accept loop returns when the token fires.
+///
+/// `bind_all` must be `true` to bind a non-loopback address.
 pub async fn serve_metrics_with_cancel(
     addr: SocketAddr,
     metrics: Arc<Metrics>,
     health: Arc<HealthState>,
     metrics_path: String,
+    bind_all: bool,
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> std::io::Result<()> {
+    check_bind_policy(addr, bind_all)?;
     let listener = TcpListener::bind(addr).await?;
     serve_metrics_on_listener(listener, metrics, health, metrics_path, cancel).await
 }
@@ -569,7 +684,14 @@ pub async fn serve_metrics_on_listener(
     // after `build_listener()` succeeds; this function deliberately does
     // not mark ready here — clients hitting /readyz before the tunnel
     // listener binds correctly receive 503.
+    let scrape_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SCRAPES));
     loop {
+        // Acquire a permit BEFORE accept so the kernel queues backpressure
+        // instead of us spawning unbounded handler tasks under a buggy scraper.
+        let permit = match scrape_sem.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => return Ok(()), // semaphore closed = shutting down
+        };
         let accept_fut = listener.accept();
         let (stream, _peer) = match (cancel.as_ref(), accept_fut) {
             (Some(tok), fut) => {
@@ -596,6 +718,7 @@ pub async fn serve_metrics_on_listener(
         let health = health.clone();
         let path_cfg = metrics_path.clone();
         tokio::spawn(async move {
+            let _permit = permit; // hold for connection lifetime
             let io = TokioIo::new(stream);
             let svc = service_fn(move |req| {
                 let metrics = metrics.clone();
@@ -603,19 +726,44 @@ pub async fn serve_metrics_on_listener(
                 let path_cfg = path_cfg.clone();
                 async move { Ok::<_, std::convert::Infallible>(handle(req, metrics, health, path_cfg)) }
             });
-            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(io, svc)
-                .await
-            {
-                if !is_normal_close(&e) {
-                    warn!("metrics conn error: {e}");
+            let conn = hyper::server::conn::http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_READ_TIMEOUT)
+                .keep_alive(false)
+                .serve_connection(io, svc);
+            match tokio::time::timeout(PER_CONN_DEADLINE, conn).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if !is_normal_close(&e) {
+                        warn!("metrics conn error: {e}");
+                    } else {
+                        debug!("metrics conn closed: {e}");
+                    }
+                }
+                Err(_) => {
+                    debug!("metrics conn exceeded {:?}; dropping", PER_CONN_DEADLINE);
                 }
             }
         });
     }
 }
 
-fn is_normal_close(_e: &hyper::Error) -> bool {
+fn is_normal_close(e: &hyper::Error) -> bool {
+    if e.is_incomplete_message() {
+        return true;
+    }
+    let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    while let Some(s) = src {
+        if let Some(io) = s.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+        src = std::error::Error::source(s);
+    }
     false
 }
 
@@ -627,12 +775,25 @@ fn handle(
 ) -> Response<Full<Bytes>> {
     let path = req.uri().path();
     if path == metrics_path {
-        let body = metrics.encode_text();
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "text/plain; version=0.0.4")
-            .body(Full::new(Bytes::from(body)))
-            .expect("static response builder")
+        // `encode_text()` can fail (poisoned mutex, encoder error). The
+        // previous `unwrap_or_default()` returned an empty 200 body, which
+        // Prometheus parses as "all metrics absent" — a scrape rule alerting
+        // on `absent()` would silently miss the failure. Translate to 500.
+        match metrics.encode_text() {
+            Ok(body) => Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/plain; version=0.0.4")
+                .body(Full::new(Bytes::from(body)))
+                .expect("static response builder"),
+            Err(e) => {
+                warn!("metrics encode_text failed: {e}");
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .body(Full::new(Bytes::from_static(b"metrics encode failed\n")))
+                    .expect("static response builder")
+            }
+        }
     } else if path == "/healthz" {
         if health.is_draining() {
             Response::builder()
@@ -707,6 +868,8 @@ mod tests {
         m.upstream_connect_failures.inc();
         m.upstream_unreachable.inc();
         m.upstream_send_drops.inc();
+        m.downstream_queue_drops.inc();
+        m.upstream_truncated.inc();
         m.queue_depth_bytes.with_label_values(&["alice"]).set(0.0);
         m.queue_dropped
             .with_label_values(&["alice", "overflow"])
@@ -723,19 +886,21 @@ mod tests {
         // §13.3 row 13
         m.udp_idle_closes.inc();
 
-        let text = String::from_utf8(m.encode_text()).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
         for name in ALL_METRIC_NAMES {
             assert!(text.contains(name), "missing metric: {name}");
         }
 
         // Verify exact count is in lockstep with spec — guards against silent
         // additions that aren't reflected in MIGRATION.md.
-        // 6 (§9.1 preserved) + 22 (§9.2 new) + 1 (§13.3 udp_idle_closes_total)
-        // = 29.
+        // 6 (§9.1 preserved) + 24 (§9.2 new — incl. upstream_truncated_total and
+        //                          downstream_queue_drops_total added in v2.0.0) +
+        // 1 (§13.3 udp_idle_closes_total)
+        // = 31.
         assert_eq!(
             ALL_METRIC_NAMES.len(),
-            29,
-            "ALL_METRIC_NAMES count drifted from spec (6 preserved + 22 new + udp_idle_closes_total)"
+            31,
+            "ALL_METRIC_NAMES count drifted from spec (6 preserved + 24 new + udp_idle_closes_total)"
         );
     }
 
@@ -753,7 +918,7 @@ mod tests {
         ] {
             m.handshake_failures.with_label_values(&[r]).inc();
         }
-        let text = String::from_utf8(m.encode_text()).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
         for r in [
             "auth",
             "ip_denied",
@@ -778,7 +943,7 @@ mod tests {
         let m = Metrics::new();
         m.ws_close.with_label_values(&["server", "1000"]).inc();
         m.ws_close.with_label_values(&["client", "1000"]).inc();
-        let text = String::from_utf8(m.encode_text()).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
         assert!(text.contains("side=\"server\""));
         assert!(text.contains("side=\"client\""));
     }
@@ -789,7 +954,7 @@ mod tests {
         let m = Metrics::new();
         m.record_connection_start("a");
         m.record_connection_end("a", 7.0);
-        let text = String::from_utf8(m.encode_text()).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
         // Spec §9.1: buckets 1, 5, 10, 30, 60, 300, 600, 1800, 3600
         for b in ["1", "5", "10", "30", "60", "300", "600", "1800", "3600"] {
             let needle = format!("le=\"{b}\"");
@@ -804,7 +969,7 @@ mod tests {
         for k in ["io_uring", "epoll", "tokio"] {
             m.runtime_kind.with_label_values(&[k]).set(1.0);
         }
-        let text = String::from_utf8(m.encode_text()).unwrap();
+        let text = String::from_utf8(m.encode_text().expect("encode")).unwrap();
         for k in ["io_uring", "epoll", "tokio"] {
             assert!(text.contains(&format!("kind=\"{k}\"")), "missing kind={k}");
         }

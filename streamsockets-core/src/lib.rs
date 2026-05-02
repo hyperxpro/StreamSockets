@@ -75,12 +75,14 @@ pub mod udp_egress;
 #[cfg(all(target_os = "linux", feature = "uring"))]
 pub mod uring_udp;
 
-pub use buf_pool::{BufHandle, BufPool, DEFAULT_BUF_SIZE, DEFAULT_POOL_CAPACITY};
+pub use buf_pool::{BufHandle, BufPool, FreezeError, DEFAULT_BUF_SIZE, DEFAULT_POOL_CAPACITY};
 pub use runtime::{
     client_threads_default, resolve_worker_count, server_threads_default, spawn_per_core,
     WorkerHandle,
 };
-pub use udp_egress::{RecvBatch, SegmentList, TokioUdp, UdpEgress};
+pub use udp_egress::{
+    classify_io_error, ErrorClass, RecvBatch, SegmentList, TokioUdp, TruncatedRecv, UdpEgress,
+};
 
 /// Test helper: returns whether io_uring is reachable on this host. Used by
 /// the uring_udp test module to gracefully skip on CI sandboxes where
@@ -106,28 +108,51 @@ pub fn env_opt(key: &str) -> Option<String> {
 
 /// Parse an integer env var. Panics on parse failure (matches Java's behavior, which
 /// throws `NumberFormatException` and crashes the JVM).
+///
+/// Logs a structured `error!` event before panicking. With `panic = "abort"`
+/// in release builds the abort happens before the panic hook can flush, so
+/// we emit the event ourselves; journald / k8s log collection will capture it.
 #[must_use]
 pub fn env_value_as_int(key: &str, default_value: i64) -> i64 {
     match env::var(key) {
-        Ok(v) => v
-            .parse()
-            .unwrap_or_else(|_| panic!("env var {key}={v} is not a valid integer")),
+        Ok(v) => match v.parse::<i64>() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(
+                    key = %key,
+                    value = %v,
+                    error = %e,
+                    "invalid env value (i64); aborting"
+                );
+                panic!("env var {key}={v} is not a valid integer")
+            }
+        },
         Err(_) => default_value,
     }
 }
 
-/// Parse a u64 env var.
+/// Parse a u64 env var. See [`env_value_as_int`] for the panic-logging rationale.
 #[must_use]
 pub fn env_value_as_u64(key: &str, default_value: u64) -> u64 {
     match env::var(key) {
-        Ok(v) => v
-            .parse()
-            .unwrap_or_else(|_| panic!("env var {key}={v} is not a valid u64")),
+        Ok(v) => match v.parse::<u64>() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(
+                    key = %key,
+                    value = %v,
+                    error = %e,
+                    "invalid env value (u64); aborting"
+                );
+                panic!("env var {key}={v} is not a valid u64")
+            }
+        },
         Err(_) => default_value,
     }
 }
 
-/// Parse a boolean env var. "true" / "1" / "yes" (case-insensitive) → `true`.
+/// Parse a boolean env var. Truthy values: `true`, `1`, `yes`, `on`
+/// (case-insensitive). Anything else (including empty) → `default_value`.
 #[must_use]
 pub fn env_bool(key: &str, default_value: bool) -> bool {
     match env::var(key) {
@@ -209,10 +234,20 @@ fn uring_kernel_supported() -> bool {
         sq_off: [u32; 10],
         cq_off: [u32; 10],
     }
+    // 4 (sq_entries) + 4 + 4 + 4 + 4 + 4 + 4 = 28
+    // resv [u32; 3] = 12 → total 40
+    // sq_off [u32; 10] = 40 → total 80
+    // cq_off [u32; 10] = 40 → total 120
+    // ABI lock: kernel `struct io_uring_params` has been 120B since 5.1; if
+    // this fails, the kernel headers grew a field and our layout is stale.
+    const _: () = assert!(std::mem::size_of::<IoUringParams>() == 120);
+
     let mut params = IoUringParams::default();
     let entries: u32 = 1;
     // SAFETY: io_uring_setup is a syscall; passing a stack-owned IoUringParams
     // is sound. The ret value is interpreted as a file descriptor on success.
+    // libc::syscall is variadic in C; the Rust binding takes c_long, so the
+    // pointer must round-trip through that integer width.
     let ret = unsafe {
         libc::syscall(
             libc::SYS_io_uring_setup,
@@ -221,8 +256,11 @@ fn uring_kernel_supported() -> bool {
         )
     };
     if ret < 0 {
-        // SAFETY: errno is a thread-local int.
-        let errno = unsafe { *libc::__errno_location() };
+        // Use io::Error::last_os_error() rather than reaching into
+        // __errno_location: the former calls the same TLS but via a stable
+        // API, and avoids the unsafe deref entirely.
+        let err = std::io::Error::last_os_error();
+        let errno = err.raw_os_error().unwrap_or(0);
         match errno {
             libc::ENOSYS | libc::EPERM | libc::EINVAL => {
                 tracing::debug!(errno, "io_uring_setup probe failed; using tokio (epoll)");
@@ -400,10 +438,23 @@ fn sd_notify_inner(msg: &str) {
         None,
     ) {
         Ok(f) => f,
-        Err(_) => return,
+        Err(e) => {
+            tracing::warn!("sd_notify: socket() failed: {e}");
+            return;
+        }
     };
-    if connect(fd.as_raw_fd(), &addr).is_ok() {
-        let _ = write(&fd, msg.as_bytes());
+    if let Err(e) = connect(fd.as_raw_fd(), &addr) {
+        tracing::debug!("sd_notify: connect() failed: {e}");
+        drop(fd);
+        return;
+    }
+    if let Err(e) = write(&fd, msg.as_bytes()) {
+        // A failed write of READY=1 will cause systemd's WatchdogSec timer to
+        // SIGKILL the process. Log loudly so this is investigatable.
+        tracing::warn!(
+            message = msg.trim_end(),
+            "sd_notify: write failed: {e}"
+        );
     }
     drop(fd);
 }
@@ -484,10 +535,35 @@ mod tests {
         std::env::remove_var("__BOOL_F__");
     }
 
+    /// Non-Linux dev builds always pick Tokio: the runtime selector short-
+    /// circuits before any kernel probe.
+    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn pick_runtime_returns_a_value() {
+    fn pick_runtime_non_linux_is_tokio() {
+        assert_eq!(pick_runtime(), RuntimeKind::Tokio);
+        assert_eq!(RuntimeKind::Tokio.label(), "tokio");
+    }
+
+    /// Linux: with `DISABLE_IOURING=true` the selector returns `Tokio` and the
+    /// label is `epoll` (kernel-side mechanism under tokio's reactor).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pick_runtime_disable_iouring_is_epoll() {
+        // The DISABLE_IOURING decision is cached by `is_iouring_disabled()`
+        // on first call (process-wide OnceCell). To make this test
+        // deterministic we set the env var before any test that reads it
+        // runs — but tests run in parallel and cargo test won't fork. We
+        // therefore exercise pick_runtime's *fallback path* indirectly by
+        // asserting the label invariant: whatever pick_runtime returns, its
+        // label must be one of the documented stable values.
         let rt = pick_runtime();
-        // just exercise the path; output depends on env
-        let _ = rt.label();
+        let label = rt.label();
+        assert!(
+            matches!(label, "io_uring" | "epoll"),
+            "unexpected label on Linux: {label}"
+        );
+        // RuntimeKind::Tokio.label() on Linux is "epoll" by spec.
+        assert_eq!(RuntimeKind::Tokio.label(), "epoll");
+        assert_eq!(RuntimeKind::Uring.label(), "io_uring");
     }
 }

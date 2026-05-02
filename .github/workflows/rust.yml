@@ -6,8 +6,15 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Weekly cargo audit + cargo deny refresh against the latest advisory DB.
-    - cron: "17 3 * * 1"
+    # Daily cargo audit + cargo deny refresh against the latest advisory DB.
+    # A CVE landing Tuesday is caught Wednesday — not the following Monday
+    # (which was the previous behavior under a weekly cron).
+    - cron: "0 3 * * *"
+
+# Default to the minimum permission a build needs. Per-job overrides may
+# elevate where required (none currently).
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,8 +24,12 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # Actions pinned to commit SHA per supply-chain hardening. Bump SHAs
+      # together with the `# v<tag>` annotation; SHAs were resolved against
+      # the upstream tag refs at pin time. `dtolnay/rust-toolchain` has no
+      # release tags — pin to a branch HEAD SHA and re-pin on dep refresh.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch: stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -26,11 +37,11 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch: stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       # Pedantic group + allow-list lives in `Cargo.toml` `[workspace.lints.clippy]`.
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -44,11 +55,11 @@ jobs:
         # `rust-toolchain.toml`.
         toolchain: ["1.86", "stable"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # branch: master
         with:
           toolchain: ${{ matrix.toolchain }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: ${{ matrix.toolchain }}
       - name: Build
@@ -59,25 +70,37 @@ jobs:
   build-test-aarch64:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch: stable
         with:
           targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: aarch64
       - name: Install cross
         run: cargo install cross --locked --version 0.2.5
       - name: Cross build
         run: cross build --workspace --release --locked --target aarch64-unknown-linux-gnu
+      # `cross test` runs the test binaries inside a QEMU-emulated aarch64
+      # rootfs. QEMU does NOT emulate the io_uring syscall surface — any
+      # uring-specific test would silently fall back to epoll without
+      # exercising the io_uring code path. Set DISABLE_IOURING=true so the
+      # runtime probe deterministically picks the epoll path under cross.
+      # The native io_uring path is exercised by `build-test-linux` (x86_64
+      # on a real kernel). The default `--features` set does not enable
+      # `tokio-uring` today; if that changes, re-evaluate this comment.
+      - name: Cross test
+        env:
+          DISABLE_IOURING: "true"
+        run: cross test --workspace --release --locked --target aarch64-unknown-linux-gnu
 
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch: stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - name: cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@5bb39ff5d5a0e94dc9e2dc94eced0c6129743a57 # v2
         with:
           command: check advisories bans licenses sources

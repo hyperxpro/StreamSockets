@@ -10,11 +10,13 @@
 //! → all `select!` arms wake → graceful WS Close 1001 + drain.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwapOption;
 use bytes::Bytes;
-use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload};
+use fastwebsockets::{FragmentCollector, Frame, OpCode, Payload, WebSocketError};
 use parking_lot::Mutex;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
@@ -24,6 +26,24 @@ use crate::backoff::Backoff;
 use crate::queue::ReconnectQueue;
 use crate::ws::{self};
 use crate::ClientConfig;
+
+/// Process-shared lock-on cell. `Arc<ArcSwapOption<SocketAddr>>` rather than
+/// per-worker `Mutex<Option<SocketAddr>>`: with N workers all binding the same
+/// UDP port via SO_REUSEPORT, each worker's listener was previously locking
+/// its own source independently. The first datagram on each fanout-bucket
+/// "won" — meaning N distinct sources could all forward to the relay
+/// simultaneously, defeating the §6.4 single-source invariant. Process-shared
+/// CAS via `compare_and_swap` ensures only the *first* datagram across all
+/// workers wins, and every subsequent foreign source (per-worker view) is
+/// dropped at the listener.
+pub type SharedLockedSource = Arc<ArcSwapOption<SocketAddr>>;
+
+/// Process-wide exit code. Defaulted to 0; bumped to 1 by any worker FSM
+/// that hits a terminal-with-EXIT_ON_FAILURE branch. `main.rs` reads this
+/// after every worker thread has joined and calls `process::exit` with the
+/// observed code. This replaces a direct `process::exit(1)` in the FSM that
+/// would skip the WS Close 1001 handshake on peer workers.
+pub type SharedExitCode = Arc<AtomicI32>;
 
 /// Visible client states (label values for `streamsockets_client_state`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +72,9 @@ impl State {
 pub async fn run_fsm(cfg: Arc<ClientConfig>, shutdown: CancellationToken) -> anyhow::Result<()> {
     let bind_addr: SocketAddr = format!("{}:{}", cfg.bind_address, cfg.bind_port).parse()?;
     let udp = build_listener_udp(bind_addr)?;
-    run_fsm_with_socket(cfg, shutdown, udp, 0).await
+    let locked: SharedLockedSource = Arc::new(ArcSwapOption::const_empty());
+    let exit_code: SharedExitCode = Arc::new(AtomicI32::new(0));
+    run_fsm_with_socket(cfg, shutdown, udp, 0, locked, exit_code).await
 }
 
 /// Per-core FSM entrypoint. Accepts a pre-bound UDP listener (built in `main()`
@@ -66,6 +88,8 @@ pub async fn run_fsm_with_socket(
     shutdown: CancellationToken,
     udp: tokio::net::UdpSocket,
     worker_idx: usize,
+    locked_source: SharedLockedSource,
+    exit_code: SharedExitCode,
 ) -> anyhow::Result<()> {
     let metrics = streamsockets_metrics::Metrics::global();
     set_state(&metrics, State::Idle);
@@ -80,7 +104,6 @@ pub async fn run_fsm_with_socket(
     }
 
     let queue = Arc::new(Mutex::new(ReconnectQueue::new(cfg.queue_max_bytes)));
-    let locked_source: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
     let last_udp_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     // Bounded UDP-listener → FSM channel (spec §6.3 — was `unbounded` and could
@@ -95,6 +118,7 @@ pub async fn run_fsm_with_socket(
     let metrics_for_listener = metrics.clone();
     let listener_token_clone = listener_token.clone();
     let account_for_listener = "client".to_string();
+    let max_frame_for_listener = cfg.max_frame_size;
     let listener_handle = tokio::spawn(async move {
         listener_loop(
             udp_for_listener,
@@ -104,24 +128,53 @@ pub async fn run_fsm_with_socket(
             udp_tx,
             listener_token_clone,
             account_for_listener,
+            max_frame_for_listener,
         )
         .await
     });
 
+    // Body wrapped in an inner async block so every exit path falls through
+    // to the listener cleanup at the bottom (fix #3: previously the
+    // reconnect-loop's `shutdown.cancelled() => return Ok(())` arm leaked the
+    // listener task because cleanup lived after the outer loop).
+    let result = run_fsm_inner(
+        cfg.clone(),
+        shutdown.clone(),
+        udp.clone(),
+        queue.clone(),
+        locked_source.clone(),
+        last_udp_at.clone(),
+        udp_rx,
+        worker_idx,
+        exit_code.clone(),
+    )
+    .await;
+
+    listener_token.cancel();
+    let _ = listener_handle.await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_fsm_inner(
+    cfg: Arc<ClientConfig>,
+    shutdown: CancellationToken,
+    udp: Arc<UdpSocket>,
+    queue: Arc<Mutex<ReconnectQueue>>,
+    locked_source: SharedLockedSource,
+    last_udp_at: Arc<Mutex<Option<Instant>>>,
+    udp_rx: tokio::sync::mpsc::Receiver<Bytes>,
+    worker_idx: usize,
+    exit_code: SharedExitCode,
+) -> anyhow::Result<()> {
+    let metrics = streamsockets_metrics::Metrics::global();
     let mut udp_rx = udp_rx;
-    // sd_notify(READY=1): per MIGRATION.md §12.2 the client signals READY after
-    // its first transition to Live (not on listener bind — bind succeeds before
-    // we have anything to forward). Fired exactly once, from worker-0 only.
     let mut ready_sent = false;
 
     // Idle until first UDP packet (§6.1) or shutdown.
     let first_payload = tokio::select! {
         biased;
-        _ = shutdown.cancelled() => {
-            listener_token.cancel();
-            let _ = listener_handle.await;
-            return Ok(());
-        }
+        _ = shutdown.cancelled() => return Ok(()),
         recv = udp_rx.recv() => recv,
     };
     let first_payload = match first_payload {
@@ -237,7 +290,7 @@ pub async fn run_fsm_with_socket(
                     }
                     LiveExit::CloseTerminal(code) => {
                         warn!(code, "received terminal close; entering Terminated");
-                        if !terminate(&cfg, &metrics, &account) {
+                        if !terminate(&cfg, &metrics, &account, &exit_code, &shutdown) {
                             // Stay Idle waiting for new traffic per §6.5 ("else: stay Idle, log").
                             return wait_idle_until_shutdown(&shutdown, &mut udp_rx).await;
                         }
@@ -256,7 +309,7 @@ pub async fn run_fsm_with_socket(
                 consecutive_failures += 1;
                 if e.is_terminal() {
                     warn!("dial failed terminal: {e}");
-                    if !terminate(&cfg, &metrics, &account) {
+                    if !terminate(&cfg, &metrics, &account, &exit_code, &shutdown) {
                         return wait_idle_until_shutdown(&shutdown, &mut udp_rx).await;
                     }
                     return Ok(());
@@ -278,7 +331,7 @@ pub async fn run_fsm_with_socket(
 
         if consecutive_failures >= cfg.retry_budget {
             warn!(consecutive_failures, "retry budget exhausted; terminating");
-            if !terminate(&cfg, &metrics, &account) {
+            if !terminate(&cfg, &metrics, &account, &exit_code, &shutdown) {
                 return wait_idle_until_shutdown(&shutdown, &mut udp_rx).await;
             }
             return Ok(());
@@ -332,8 +385,6 @@ pub async fn run_fsm_with_socket(
         }
     }
 
-    listener_token.cancel();
-    let _ = listener_handle.await;
     Ok(())
 }
 
@@ -367,7 +418,7 @@ async fn run_live(
     ws: ws::WsHandle,
     udp: Arc<UdpSocket>,
     queue: Arc<Mutex<ReconnectQueue>>,
-    _locked: Arc<Mutex<Option<SocketAddr>>>,
+    locked: SharedLockedSource,
     last_udp_at: Arc<Mutex<Option<Instant>>>,
     udp_rx: &mut tokio::sync::mpsc::Receiver<Bytes>,
     account: &str,
@@ -424,7 +475,13 @@ async fn run_live(
     let pong_deadline = tokio::time::sleep(ping_interval + ping_timeout);
     tokio::pin!(pong_deadline);
     let mut missed_pongs: u32 = 0;
-    let mut last_ping_sent: Option<Instant> = None;
+    // (Fix #20) Ping/Pong payload pairing. RFC 6455 §5.5.3 requires the Pong
+    // to echo the Ping payload. We use a monotonic u64 written network-order
+    // as the payload; on Pong arrival the echoed payload must match the
+    // last_ping_payload snapshot, otherwise we treat it as a stale Pong
+    // and do not compute RTT or clear miss-count.
+    let mut last_ping_sent: Option<(Instant, [u8; 8])> = None;
+    let mut ping_seq: u64 = 0;
 
     let udp_idle_deadline = tokio::time::sleep(cfg.udp_timeout());
     tokio::pin!(udp_idle_deadline);
@@ -435,6 +492,32 @@ async fn run_live(
             // Shutdown signal: send WS Close 1001, allow brief drain, then return.
             // We `return` immediately so the arm fires at most once.
             _ = shutdown.cancelled() => {
+                // Drain any UDP frames buffered in `udp_rx` before we send the
+                // Close frame and walk away — otherwise data the listener
+                // already received but hadn't pumped through is silently
+                // dropped during the 2 s grace window. Bound by a 500 ms wall
+                // clock so a stuck producer can't hold up shutdown.
+                let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = tokio::time::sleep_until(drain_deadline) => break,
+                        msg = udp_rx.recv() => {
+                            match msg {
+                                Some(payload) => {
+                                    if ws
+                                        .write_frame(Frame::binary(Payload::Owned(payload.to_vec())))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
                 let _ = ws.write_frame(Frame::close(1001, b"client going away")).await;
                 debug!("sent 1001 on shutdown");
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -459,17 +542,35 @@ async fn run_live(
                     Ok(frame) => match frame.opcode {
                         OpCode::Binary => {
                             let bytes = frame.payload.to_owned();
-                            if let Err(e) = send_udp_to_locked(&udp, &_locked, &bytes).await {
+                            if let Err(e) = send_udp_to_locked(&udp, &locked, &bytes).await {
                                 debug!("udp send err: {e}");
                             }
                         }
                         OpCode::Pong => {
-                            if let Some(sent) = last_ping_sent.take() {
-                                let rtt = sent.elapsed().as_secs_f64();
-                                metrics.ping_rtt_seconds.with_label_values(&[account]).observe(rtt);
+                            // (Fix #20) Validate the Pong echoes the most recent Ping payload.
+                            // A spurious or replayed Pong (no matching Ping in flight, or
+                            // payload mismatch) must not clear the miss-count or skew RTT.
+                            let echoed = frame.payload.as_ref();
+                            match last_ping_sent.as_ref() {
+                                Some((sent_at, expected)) if echoed == expected.as_slice() => {
+                                    let rtt = sent_at.elapsed().as_secs_f64();
+                                    metrics.ping_rtt_seconds.with_label_values(&[account]).observe(rtt);
+                                    last_ping_sent = None;
+                                    missed_pongs = 0;
+                                    // Re-arm the deadline for the FULL next
+                                    // cycle (next ping fire + ping_timeout).
+                                    // Previously this set `now + ping_timeout`,
+                                    // which fired before the next ping when
+                                    // ping_timeout < ping_interval and tripped
+                                    // a spurious miss.
+                                    pong_deadline
+                                        .as_mut()
+                                        .reset(tokio::time::Instant::now() + ping_interval + ping_timeout);
+                                }
+                                _ => {
+                                    debug!(echoed_len = echoed.len(), "ignoring unmatched Pong payload");
+                                }
                             }
-                            missed_pongs = 0;
-                            pong_deadline.as_mut().reset(tokio::time::Instant::now() + ping_timeout);
                         }
                         OpCode::Ping => {
                             // fastwebsockets auto-pong handles this.
@@ -492,11 +593,23 @@ async fn run_live(
                         }
                     },
                     Err(e) => {
-                        // Map fastwebsockets parse / RSV / opcode errors to 1002.
-                        // Spec §5.3: "Any other frame opcode (RSV bits set, unknown
+                        // (Fix #21) Match on WebSocketError variants instead of
+                        // string-sniffing the Display output. Spec §5.3:
+                        // "Any other frame opcode (RSV bits set, unknown
                         // opcode): close 1002 (Protocol Error)."
-                        let s = e.to_string();
-                        let is_protocol = s.contains("RSV") || s.contains("opcode") || s.contains("Reserved");
+                        let is_protocol = matches!(
+                            &e,
+                            WebSocketError::ReservedBitsNotZero
+                                | WebSocketError::InvalidFragment
+                                | WebSocketError::InvalidContinuationFrame
+                                | WebSocketError::ControlFrameFragmented
+                                | WebSocketError::PingFrameTooLarge
+                                | WebSocketError::FrameTooLarge
+                                | WebSocketError::InvalidValue
+                                | WebSocketError::InvalidCloseFrame
+                                | WebSocketError::InvalidCloseCode
+                                | WebSocketError::InvalidUTF8
+                        );
                         if is_protocol {
                             metrics.protocol_violations.with_label_values(&["frame_format"]).inc();
                             return LiveExit::CloseTerminal(1002);
@@ -505,15 +618,30 @@ async fn run_live(
                     }
                 }
             }
-            // 3) Send a ping
+            // 3) Send a ping with a monotonic-counter payload (fix #20).
             _ = ping_iv.tick() => {
-                last_ping_sent = Some(Instant::now());
-                if let Err(e) = ws.write_frame(Frame::new(true, OpCode::Ping, None, Payload::Borrowed(b"PING"))).await {
+                ping_seq = ping_seq.wrapping_add(1);
+                let payload_bytes = ping_seq.to_be_bytes();
+                last_ping_sent = Some((Instant::now(), payload_bytes));
+                if let Err(e) = ws
+                    .write_frame(Frame::new(true, OpCode::Ping, None, Payload::Borrowed(&payload_bytes)))
+                    .await
+                {
                     return LiveExit::Transient(format!("ws ping write: {e}"));
                 }
             }
             // 4) Pong deadline
             _ = &mut pong_deadline => {
+                // If no ping is currently outstanding, the deadline fired
+                // because we haven't reached the next ping interval — this
+                // is a config bug (ping_timeout < ping_interval) but the
+                // safe thing is to wait the full cycle, not count a miss.
+                if last_ping_sent.is_none() {
+                    pong_deadline
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + ping_interval + ping_timeout);
+                    continue;
+                }
                 missed_pongs += 1;
                 metrics.ping_timeouts.with_label_values(&[account]).inc();
                 warn!(missed_pongs, permitted_misses, "ping deadline missed");
@@ -556,11 +684,12 @@ fn build_listener_udp(bind: SocketAddr) -> std::io::Result<UdpSocket> {
 
 async fn send_udp_to_locked(
     udp: &UdpSocket,
-    locked: &Mutex<Option<SocketAddr>>,
+    locked: &SharedLockedSource,
     payload: &[u8],
 ) -> std::io::Result<()> {
-    let target = match *locked.lock() {
-        Some(a) => a,
+    let snap = locked.load();
+    let target = match snap.as_ref() {
+        Some(a) => **a,
         None => return Ok(()),
     };
     udp.send_to(payload, target).await.map(|_| ())
@@ -590,31 +719,52 @@ fn set_state(metrics: &streamsockets_metrics::Metrics, s: State) {
     }
 }
 
-/// Returns `true` if the process should exit (EXIT_ON_FAILURE=true).
+/// Returns `true` if the worker should return cleanly (EXIT_ON_FAILURE=true).
 /// Returns `false` if we should fall through to wait-Idle behavior per §6.5.
-fn terminate(cfg: &ClientConfig, metrics: &streamsockets_metrics::Metrics, account: &str) -> bool {
+///
+/// Fix #2: previously this called `std::process::exit(1)` directly, which
+/// SIGKILLed peer workers mid-handshake and skipped their WS Close 1001.
+/// Now: stamp the shared exit code, fire the global cancel, and return so
+/// every worker drains gracefully. `main.rs` reads the exit code after all
+/// workers join.
+fn terminate(
+    cfg: &ClientConfig,
+    metrics: &streamsockets_metrics::Metrics,
+    account: &str,
+    exit_code: &SharedExitCode,
+    shutdown: &CancellationToken,
+) -> bool {
     set_state(metrics, State::Terminated);
     metrics
         .reconnect_state
         .with_label_values(&[account])
         .set(2.0);
     if cfg.exit_on_failure {
-        error!("EXIT_ON_FAILURE=true; exiting 1");
-        std::process::exit(1);
+        error!("EXIT_ON_FAILURE=true; signalling exit 1 across workers");
+        // SeqCst: any later observer that reads `exit_code` after observing
+        // shutdown.is_cancelled() must see this store. AcqRel would be enough
+        // on x86 but the cross-arch story is cleaner with SeqCst.
+        exit_code.store(1, Ordering::SeqCst);
+        shutdown.cancel();
+        return true;
     }
     warn!("terminal but EXIT_ON_FAILURE=false; staying up Idle (spec §6.5)");
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn listener_loop(
     udp: Arc<UdpSocket>,
-    locked_source: Arc<Mutex<Option<SocketAddr>>>,
+    locked_source: SharedLockedSource,
     last_udp_at: Arc<Mutex<Option<Instant>>>,
     metrics: Arc<streamsockets_metrics::Metrics>,
     tx: tokio::sync::mpsc::Sender<Bytes>,
     cancel: CancellationToken,
     account: String,
+    max_frame_size: usize,
 ) {
+    // Buffer sized to the absolute UDP datagram ceiling (u16 length field).
+    // Per-frame size is enforced after recv via `n > max_frame_size`.
     let mut buf = vec![0u8; 65536];
     loop {
         tokio::select! {
@@ -623,18 +773,40 @@ async fn listener_loop(
             r = udp.recv_from(&mut buf) => {
                 match r {
                     Ok((n, peer)) => {
-                        let mut lock = locked_source.lock();
-                        match *lock {
+                        // (Fix #4) Enforce MAX_FRAME_SIZE at the listener.
+                        // Anything larger than the configured cap cannot be
+                        // legitimately forwarded; drop and count.
+                        if n > max_frame_size {
+                            metrics
+                                .queue_dropped
+                                .with_label_values(&[&account, "oversize"])
+                                .inc();
+                            debug!(received = n, max = max_frame_size, "dropping oversize UDP datagram");
+                            continue;
+                        }
+                        // (Fix #5) Process-shared lock-on via ArcSwapOption +
+                        // CAS-style first-write-wins. `compare_and_swap` is
+                        // not available on ArcSwapOption directly, so we do a
+                        // load-test-then-rcu pattern: snapshot, if empty
+                        // attempt rcu-store. `rcu` retries on contention so
+                        // exactly one peer wins across all workers.
+                        let snap = locked_source.load();
+                        match snap.as_ref() {
                             None => {
-                                info!(peer = %peer, "first UDP packet — locking source");
-                                *lock = Some(peer);
-                                drop(lock);
+                                let new_arc = Arc::new(peer);
+                                let prev = locked_source.compare_and_swap(&None::<Arc<SocketAddr>>, Some(new_arc.clone()));
+                                if prev.is_none() {
+                                    info!(peer = %peer, "first UDP packet — locking source (process-wide)");
+                                } else if let Some(prev_addr) = prev.as_ref() {
+                                    if **prev_addr != peer {
+                                        metrics.client_foreign_sources.inc();
+                                        debug!(peer = %peer, "dropping foreign UDP source (lost CAS)");
+                                        continue;
+                                    }
+                                }
                             }
-                            Some(addr) if addr == peer => {
-                                drop(lock);
-                            }
+                            Some(addr) if **addr == peer => {}
                             Some(_) => {
-                                drop(lock);
                                 metrics.client_foreign_sources.inc();
                                 debug!(peer = %peer, "dropping foreign UDP source");
                                 continue;
@@ -643,7 +815,7 @@ async fn listener_loop(
                         *last_udp_at.lock() = Some(Instant::now());
                         let payload = Bytes::copy_from_slice(&buf[..n]);
                         // try_send is non-blocking; on Full we drop and count as
-                        // overflow so a slow consumer cannot OOM the listener.
+                        // channel-overflow so a slow consumer cannot OOM the listener.
                         match tx.try_send(payload) {
                             Ok(()) => {}
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {

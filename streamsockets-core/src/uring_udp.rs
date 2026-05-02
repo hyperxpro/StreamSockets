@@ -30,19 +30,31 @@ use bytes::Bytes;
 use tokio_uring::buf::fixed::FixedBufRegistry;
 use tokio_uring::net::UdpSocket;
 
-use crate::buf_pool::BufPool;
-use crate::udp_egress::{RecvBatch, SegmentList, UdpEgress};
+use crate::buf_pool::{BufPool, DEFAULT_BUF_SIZE, DEFAULT_POOL_CAPACITY};
+use crate::udp_egress::{RecvBatch, SegmentList, TruncatedRecv, UdpEgress};
 
-/// Default registered-buffer pool size (1024 × 64 KiB ≈ 64 MiB resident per
-/// worker, matching MIGRATION.md §7.3).
-pub const DEFAULT_REGISTERED_BUFS: usize = 1024;
-/// Default per-buffer size for the registered pool.
-pub const DEFAULT_REGISTERED_BUF_SIZE: usize = 64 * 1024;
+/// Default registered-buffer pool size — alias of
+/// [`crate::buf_pool::DEFAULT_POOL_CAPACITY`]. Both pools share the same
+/// per-worker shape so they can't drift.
+pub const DEFAULT_REGISTERED_BUFS: usize = DEFAULT_POOL_CAPACITY;
+/// Default per-buffer size for the registered pool — alias of
+/// [`crate::buf_pool::DEFAULT_BUF_SIZE`].
+pub const DEFAULT_REGISTERED_BUF_SIZE: usize = DEFAULT_BUF_SIZE;
 
 /// A pre-registered buffer pool. Construction calls `IORING_REGISTER_BUFFERS`
 /// against the surrounding tokio_uring runtime; drop unregisters.
+///
+/// Drop ordering contract: the `Arc<UringBufRegistry>` MUST be dropped from
+/// inside the same `tokio_uring::start { ... }` block that constructed it —
+/// `unregister` issues an io_uring opcode and panics or silently fails if no
+/// tokio_uring runtime is current. The supervisor enforces this by holding
+/// the `Arc` only inside the worker future. As an in-process safety net,
+/// `Drop` logs at ERROR if it observes an unregister failure (without
+/// double-panicking).
 pub struct UringBufRegistry {
     inner: FixedBufRegistry<Vec<u8>>,
+    n_slots: usize,
+    buf_size: usize,
 }
 
 impl UringBufRegistry {
@@ -53,7 +65,11 @@ impl UringBufRegistry {
         let bufs: Vec<Vec<u8>> = (0..count).map(|_| vec![0u8; size]).collect();
         let registry = FixedBufRegistry::new(bufs);
         registry.register()?;
-        Ok(Self { inner: registry })
+        Ok(Self {
+            inner: registry,
+            n_slots: count,
+            buf_size: size,
+        })
     }
 
     /// Default-sized registry (1024 × 64 KiB).
@@ -67,13 +83,41 @@ impl UringBufRegistry {
     pub fn check_out(&self, index: usize) -> Option<tokio_uring::buf::fixed::FixedBuf> {
         self.inner.check_out(index)
     }
+
+    /// Number of registered slots. Sourced at construction so callers'
+    /// round-robin uses the actual registry size, not a default that may
+    /// exceed it (which silently bypasses the fast path).
+    pub fn len(&self) -> usize {
+        self.n_slots
+    }
+
+    /// True iff the registry has zero slots.
+    pub fn is_empty(&self) -> bool {
+        self.n_slots == 0
+    }
+
+    /// Per-buffer size — exposed so callers can pre-size matching pools.
+    pub fn buf_size(&self) -> usize {
+        self.buf_size
+    }
 }
 
 impl Drop for UringBufRegistry {
     fn drop(&mut self) {
         // FixedBufRegistry::unregister returns io::Result; we can't propagate
-        // from Drop. Best-effort.
-        let _ = self.inner.unregister();
+        // from Drop. If unregister fails AND we're not already panicking,
+        // log at ERROR — that's almost always a violation of the
+        // "drop inside tokio_uring::start" contract.
+        let res = self.inner.unregister();
+        if let Err(e) = res {
+            if !std::thread::panicking() {
+                tracing::error!(
+                    error = %e,
+                    "UringBufRegistry::drop: unregister failed; \
+                     verify the Arc<UringBufRegistry> is dropped inside the tokio_uring::start block"
+                );
+            }
+        }
     }
 }
 
@@ -94,7 +138,10 @@ pub struct IoUringUdp {
     next_recv_idx: usize,
     /// Whether `socket` was `connect()`ed (gates use of `read_fixed`).
     is_connected: bool,
-    /// Number of registered buffer slots — used to clamp `next_recv_idx`.
+    /// Number of registered buffer slots — sourced from the registry at
+    /// construction. Was previously hard-coded to `DEFAULT_REGISTERED_BUFS`,
+    /// which silently bypassed the fast path for any registry smaller than the
+    /// default (e.g. tests using 8 slots round-robined over 1024 indices).
     n_slots: usize,
 }
 
@@ -102,7 +149,7 @@ impl IoUringUdp {
     /// Build from a connected `tokio_uring::net::UdpSocket`. Connected mode
     /// allows `read_fixed`/`write_fixed` to use kernel-registered buffers.
     pub fn connected(socket: UdpSocket, registry: std::sync::Arc<UringBufRegistry>) -> Self {
-        let n_slots = DEFAULT_REGISTERED_BUFS;
+        let n_slots = registry.len();
         Self {
             socket,
             registry: Some(registry),
@@ -155,32 +202,79 @@ impl UdpEgress for IoUringUdp {
         }
     }
 
+    /// **Cancel-safety:** `recv_segments` is **NOT** cancel-safe. tokio-uring's
+    /// `read_fixed` submits an SQE that the kernel may complete after this
+    /// future is dropped; the `FixedBuf` slot returns to the registry on
+    /// drop, and a subsequent `check_out` of the same slot races kernel
+    /// writes. Callers MUST NOT race this future against a cancellation
+    /// arm in `tokio::select!`. Drive cancellation via a wrapper that
+    /// awaits the cancel signal *before* `recv_segments` is polled, then
+    /// allow this future to complete.
     async fn recv_segments(&mut self, pool: &BufPool) -> io::Result<RecvBatch> {
         if self.is_connected && self.registry.is_some() {
-            // Try a registered buffer; if the slot is checked out (rare under
-            // round-robin), fall back to a pooled Vec.
+            // Try a registered buffer; if the slot is checked out (e.g. another
+            // `IoUringUdp` sharing the same `Arc<UringBufRegistry>` happened to
+            // hit the same round-robin index), log once and fall back to the
+            // pooled-Vec path. The fast path is opportunistic, not load-bearing.
             let slot = self.next_slot();
             let registry = self.registry.as_ref().expect("checked above").clone();
             if let Some(fixed) = registry.check_out(slot) {
                 let (res, buf) = self.socket.read_fixed(fixed).await;
                 let n = res?;
-                // Copy into a pooled BufHandle so the RecvBatch shape stays
-                // uniform. The fixed buf returns to the registry on drop here.
+                // Trust the kernel-returned `n` — `read_fixed` returning Ok(n)
+                // means the kernel wrote exactly n bytes into the buffer's
+                // prefix. `bytes_init()` is the *known* init count which may
+                // lag the kernel write across tokio-uring versions; using `n`
+                // directly is the documented contract from
+                // io_uring_prep_read_fixed.
                 let mut out = pool.acquire();
                 let dst = out.as_mut();
-                debug_assert!(n <= dst.len(), "registered buf exceeds pool buf size");
+                if n > dst.len() {
+                    // Kernel-controlled length exceeded the pool buffer size:
+                    // operator misconfigured pools relative to the registered
+                    // registry. Surface as TruncatedRecv so the caller can
+                    // increment a counter and (on the WS path) close 1009.
+                    drop(buf);
+                    let buf_len = dst.len();
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        TruncatedRecv {
+                            wire_len: n,
+                            buf_len,
+                        },
+                    ));
+                }
                 use tokio_uring::buf::IoBuf;
-                let init = buf.bytes_init();
-                let read_n = init.min(n);
                 let src_ptr = buf.stable_ptr();
-                // SAFETY: stable_ptr returns a valid pointer for at least bytes_init bytes.
-                let src = unsafe { std::slice::from_raw_parts(src_ptr, read_n) };
-                dst[..read_n].copy_from_slice(src);
+                // SAFETY:
+                // - `read_fixed(fixed).await` yielded `Ok(n)`; the kernel
+                //   wrote exactly `n` bytes into the buffer prefix and the
+                //   completion arrived BEFORE this `.await` resolved
+                //   (no concurrent kernel writer remains).
+                // - `stable_ptr()` returns a pointer valid for at least
+                //   `buf.bytes_total()` bytes (the registered buffer size,
+                //   which is `>= n` because the kernel cannot write past
+                //   the registered length).
+                // - We hold `buf` (FixedBuf) until after the copy_from_slice
+                //   below; the underlying allocation cannot be reclaimed
+                //   while `buf` is live.
+                // - The slice is never aliased mutably: tokio-uring's
+                //   FixedBuf API does not hand out concurrent &mut while
+                //   `buf` is live.
+                let src = unsafe { std::slice::from_raw_parts(src_ptr, n) };
+                dst[..n].copy_from_slice(src);
                 drop(buf);
                 let mut segments = SegmentList::new();
-                segments.push((0, read_n));
+                segments.push((0, to_u16(n)));
                 return Ok(RecvBatch { buf: out, segments });
             }
+            // Slot was held — fall through to the non-fixed path. Logging at
+            // debug since a transient collision is acceptable; a steady stream
+            // of these means the registry is undersized for the workload.
+            tracing::debug!(
+                slot,
+                "uring registered-buffer slot busy; falling back to pooled recv"
+            );
         }
 
         // Non-fixed path: recv into a pooled Vec via recv_from. tokio-uring's
@@ -191,11 +285,28 @@ impl UdpEgress for IoUringUdp {
         let (n, _addr) = res?;
         let mut out = pool.acquire();
         let dst = out.as_mut();
+        if n > dst.len() {
+            let buf_len = dst.len();
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                TruncatedRecv {
+                    wire_len: n,
+                    buf_len,
+                },
+            ));
+        }
         dst[..n].copy_from_slice(&scratch[..n]);
         let mut segments = SegmentList::new();
-        segments.push((0, n));
+        segments.push((0, to_u16(n)));
         Ok(RecvBatch { buf: out, segments })
     }
+}
+
+/// UDP datagrams cap at 65535 bytes; segment lengths fit in u16. Saturating
+/// cast catches the impossible-but-defensive "n > 65535" path.
+#[inline]
+fn to_u16(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]

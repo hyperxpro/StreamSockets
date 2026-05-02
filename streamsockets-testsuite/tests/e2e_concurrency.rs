@@ -58,7 +58,6 @@ accounts:
     let accounts = common::write_accounts(&yaml);
     let _server =
         common::spawn_server(server_port, accounts.path().to_path_buf(), metrics_port).await;
-    common::settle(Duration::from_millis(200)).await;
 
     // Three clients, each with its own UDP listener port + auth token + route.
     let port1 = common::free_udp_port().await;

@@ -14,12 +14,30 @@ pub struct Backoff {
 }
 
 impl Backoff {
+    /// Construct. Panics if `cap < base` — that combination produces a
+    /// silently-stuck retry loop where every sample is clamped to `cap`,
+    /// the curve never grows, and the operator's intended max-delay is
+    /// effectively the *min* delay. Fail-fast at construction.
     pub fn new(base: Duration, cap: Duration) -> Self {
+        assert!(cap >= base, "Backoff: cap {cap:?} must be >= base {base:?}");
         Self {
             base,
             cap,
             prev: base,
         }
+    }
+
+    /// Fallible constructor; same semantics as `new` but returns an error
+    /// instead of panicking. Useful from `validate()` paths.
+    pub fn try_new(base: Duration, cap: Duration) -> Result<Self, &'static str> {
+        if cap < base {
+            return Err("Backoff: cap must be >= base");
+        }
+        Ok(Self {
+            base,
+            cap,
+            prev: base,
+        })
     }
 
     /// Sample the next delay. Mutates internal state.
@@ -98,6 +116,19 @@ mod tests {
             max as f64 >= cap as f64 * 0.99,
             "max sample {max} did not approach cap {cap}"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "must be >= base")]
+    fn cap_below_base_panics() {
+        // (Fix #15) cap < base must be rejected at construction.
+        let _ = Backoff::new(Duration::from_secs(10), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn try_new_rejects_cap_below_base() {
+        assert!(Backoff::try_new(Duration::from_secs(10), Duration::from_secs(1)).is_err());
+        assert!(Backoff::try_new(Duration::from_secs(1), Duration::from_secs(10)).is_ok());
     }
 
     #[test]

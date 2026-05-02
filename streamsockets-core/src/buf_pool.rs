@@ -126,21 +126,49 @@ impl BufHandle {
     /// pool-aware `Bytes` (replaces the previous handcrafted `bytes::Vtable`
     /// approach mentioned in older drafts of MIGRATION.md §7.3).
     ///
-    /// `len` MUST be ≤ [`Self::capacity`]; otherwise this method panics.
-    #[must_use]
-    pub fn freeze(self, len: usize) -> Bytes {
-        assert!(
-            len <= self.capacity(),
-            "freeze len {len} exceeds buffer capacity {}",
-            self.capacity()
-        );
+    /// Returns [`FreezeError::OversizedLength`] when `len > capacity`. The
+    /// length argument is typically kernel-derived (`recvmsg` wire length); in
+    /// release builds we run with `panic = "abort"`, so an `assert!` here
+    /// would terminate the process before structured logging gets a chance to
+    /// flush. Callers must drop the frame and bump a counter instead.
+    pub fn freeze(self, len: usize) -> Result<Bytes, FreezeError> {
+        let cap = self.capacity();
+        if len > cap {
+            return Err(FreezeError::OversizedLength { len, capacity: cap });
+        }
         // Bytes::from_owner accepts T: AsRef<[u8]> + Send + 'static. Our
         // BufHandle satisfies both: AsRef<[u8]> below; Send because the inner
         // Vec<u8> + Weak<...> are both Send.
         let full = Bytes::from_owner(self);
-        full.slice(..len)
+        Ok(full.slice(..len))
     }
 }
+
+/// Error returned by [`BufHandle::freeze`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreezeError {
+    /// `len` exceeded the buffer's capacity. The handle is consumed; the
+    /// underlying allocation returns to the pool on drop. Caller should
+    /// log + bump a counter and discard the frame.
+    OversizedLength {
+        /// The requested length.
+        len: usize,
+        /// The buffer's actual capacity.
+        capacity: usize,
+    },
+}
+
+impl std::fmt::Display for FreezeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OversizedLength { len, capacity } => {
+                write!(f, "freeze len {len} exceeds buffer capacity {capacity}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FreezeError {}
 
 impl AsRef<[u8]> for BufHandle {
     fn as_ref(&self) -> &[u8] {
@@ -211,7 +239,7 @@ mod tests {
         {
             let mut buf = pool.acquire();
             buf.as_mut()[..5].copy_from_slice(b"hello");
-            let bytes = buf.freeze(5);
+            let bytes = buf.freeze(5).expect("freeze fits");
             assert_eq!(&bytes[..], b"hello");
             // Pool has zero idle while bytes is alive (the BufHandle is owned by
             // the inner Bytes refcount).
@@ -227,10 +255,32 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "freeze len")]
-    fn freeze_oversize_panics() {
+    fn freeze_oversize_returns_error() {
         let pool = BufPool::new(1, 8);
         let buf = pool.acquire();
-        let _ = buf.freeze(99);
+        let err = buf.freeze(99).expect_err("oversize must error");
+        assert_eq!(
+            err,
+            FreezeError::OversizedLength {
+                len: 99,
+                capacity: 8
+            }
+        );
+        // The error case still consumed the handle; the buffer is gone here
+        // but the inner Vec dropped (no pool return because the handle is
+        // moved into Bytes::from_owner only on the success path).
+    }
+
+    #[test]
+    fn freeze_error_drops_handle_to_pool() {
+        // Sanity: the handle is consumed by-value; on the error path it is
+        // simply dropped, returning the underlying buffer to the pool.
+        let pool = BufPool::new(1, 8);
+        assert_eq!(pool.idle_count(), 0);
+        {
+            let buf = pool.acquire();
+            let _ = buf.freeze(99);
+        }
+        assert_eq!(pool.idle_count(), 1, "errored freeze still recycles buf");
     }
 }

@@ -3,7 +3,13 @@ all-features = false
 
 [advisories]
 version = 2
-yanked = "warn"
+# `deny` rather than `warn`: a yanked version slipping into a release build
+# is a supply-chain finding, not a notice.
+yanked = "deny"
+# Surface unmaintained crates from this workspace's tree (transitive included
+# implicitly). RUSTSEC `unsound` advisories aren't a separate scope in
+# cargo-deny v2 — they trip the same "ignore or fix" gate as any vuln.
+unmaintained = "workspace"
 # Ignored advisories — every entry MUST link to the upstream issue + state the
 # transition plan. Re-evaluate at the next dependency-bump cycle.
 ignore = [
@@ -15,12 +21,19 @@ ignore = [
     # `rustls-pemfile` 2.x marked unmaintained 2025-09; functional successor
     # is in-tree on `rustls` 0.24+. Bumping rustls to 0.24 is a minor-version
     # window we are deferring to v2.1; 2.2 has no known runtime issues for our
-    # usage (one-shot key/cert parsing at startup).
+    # usage. NOTE: we DO re-parse PEM on every TLS-cert reload —
+    # `streamsockets_server::tls::HotReloadResolver::reload()` calls
+    # `load_certified_key()` which invokes `rustls_pemfile::certs()` /
+    # `rustls_pemfile::private_key()` against on-disk bytes. The 2.2 branch
+    # has no advisories affecting that path; the unmaintained label is the
+    # only outstanding finding.
     "RUSTSEC-2025-0134",
-    # `serde_yml` flagged unsound in 2025-09. We use it for a single startup-
-    # time YAML parse of `accounts.yml` (operator-supplied trusted file) and
-    # do not parse untrusted YAML at runtime — the unsoundness is in arbitrary
-    # untrusted-input deserialization paths we don't exercise. v2.1 will
+    # `serde_yml` flagged unsound in 2025-09. We use it for two paths:
+    # (1) startup-time YAML parse of `accounts.yml` and (2) hot-reload re-
+    # parse of the same file on inotify event / interval. Both inputs come
+    # from the operator-supplied trusted file on disk — never untrusted
+    # network input — so the documented unsoundness in arbitrary-input
+    # deserialization is out of scope for our threat model. v2.1 will
     # replace with the maintained `yaml-ng` successor (formerly an _ng-suffixed
     # fork name we avoid spelling here so the spec self-check grep stays clean);
     # confirming schema-compatibility with existing `accounts.yml` files.
@@ -48,7 +61,32 @@ allow = [
 confidence-threshold = 0.93
 
 [bans]
-multiple-versions = "warn"
+# Tighten from `warn` → `deny`. Each entry in `skip` MUST justify the dupe;
+# bumping a transitive dep that resolves a duplicate should remove its skip
+# entry in the same PR.
+multiple-versions = "deny"
+skip = [
+    # base64 0.21 is pinned by fastwebsockets 0.10; the workspace uses 0.22
+    # directly. fastwebsockets 0.11 (pending review) drops 0.21.
+    { name = "base64", version = "0.21" },
+    # bitflags 1.x via inotify 0.10 (pulled by notify 7); notify 8 drops it.
+    # Tracked alongside RUSTSEC-2024-0384 in the v2.1 dep refresh.
+    { name = "bitflags", version = "1" },
+    # cpufeatures 0.2 lingers in the rustls/aws-lc-rs subtree; 0.3 is current.
+    # Bumps when aws-lc-rs releases a build that adopts 0.3.
+    { name = "cpufeatures", version = "0.2" },
+    # getrandom 0.2 vs 0.3 — same pattern; rand_core 0.6 still pins 0.2.
+    { name = "getrandom", version = "0.2" },
+    # hashbrown 0.14 via prometheus 0.13's transitive deps; 0.15 elsewhere.
+    { name = "hashbrown", version = "0.14" },
+    # socket2 0.5 vs 0.6: hickory-resolver pins 0.5; tokio 1.43 uses 0.6.
+    { name = "socket2", version = "0.5" },
+    # thiserror 1.x via several legacy transitives; the workspace itself
+    # uses 2.x. Removable when the last 1.x transitive bumps (rustls 0.24
+    # ETA covers most of these).
+    { name = "thiserror", version = "1" },
+    { name = "thiserror-impl", version = "1" },
+]
 # Path-only workspace deps (e.g. `streamsockets-core = { path = "..." }`) are
 # detected as wildcard deps. They aren't a supply-chain concern (no registry
 # fetch). `allow-wildcard-paths = true` (cargo-deny ≥ 0.16) limits the deny to
@@ -57,6 +95,10 @@ multiple-versions = "warn"
 wildcards = "allow"
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+# `deny` for production: any source outside the explicit allowlist below is a
+# supply-chain finding. Operators bumping a dep that points at a forked git
+# repo (rare) must add it explicitly with a justification.
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

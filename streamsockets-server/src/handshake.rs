@@ -20,9 +20,12 @@ use tracing::{debug, info, warn};
 
 use crate::proxy_protocol::{self, ProxyOutcome};
 use crate::tunnel;
-use crate::Server;
+use crate::{try_acquire_per_ip, PerIpGuard, Server};
 
 const HANDSHAKE_TIMEOUT_SECONDS: u64 = 10;
+/// Timeout for the WS upgrade future after the response has been written. A
+/// stalled client otherwise pins the upgrade task until TCP keepalive fires.
+const UPGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Top-level entry: accept a TCP, optional PROXY-proto strip, optional TLS, hyper HTTP/1 upgrade.
 pub async fn serve_connection(server: Arc<Server>, mut stream: TcpStream, peer: SocketAddr) {
@@ -30,54 +33,111 @@ pub async fn serve_connection(server: Arc<Server>, mut stream: TcpStream, peer: 
         debug!("set_nodelay failed: {e}");
     }
 
-    // Capacity guard.
-    if server.cfg.max_concurrent_connections > 0 {
-        let cur = server.active_count.load(Ordering::SeqCst);
-        if cur >= server.cfg.max_concurrent_connections {
-            server
-                .metrics
-                .handshake_failures
-                .with_label_values(&["capacity"])
-                .inc();
-            warn!(peer = %peer, "rejecting at capacity ({})", cur);
-            let _ = write_503(stream).await;
-            return;
+    // Global capacity guard. Atomic `fetch_add`-then-revert avoids the TOCTOU
+    // window where N concurrent accepts each see `cur < max` and admit `max+N-1`.
+    // `Relaxed` is sufficient — the counter is a single-word fence-free gauge,
+    // and the global cap is intentionally approximate (slop of one is fine).
+    let admitted = if server.cfg.max_concurrent_connections > 0 {
+        let cap = server.cfg.max_concurrent_connections;
+        let prev = server.active_count.fetch_add(1, Ordering::Relaxed);
+        if prev >= cap {
+            server.active_count.fetch_sub(1, Ordering::Relaxed);
+            false
+        } else {
+            true
         }
+    } else {
+        server.active_count.fetch_add(1, Ordering::Relaxed);
+        true
+    };
+    if !admitted {
+        server
+            .metrics
+            .handshake_failures
+            .with_label_values(&["capacity"])
+            .inc();
+        warn!(peer = %peer, "rejecting at capacity");
+        let _ = write_503(stream).await;
+        return;
     }
-    server.active_count.fetch_add(1, Ordering::SeqCst);
     let active_guard = ActiveGuard {
         counter: server.active_count.clone(),
     };
 
-    // PROXY-protocol parsing (optional). Replaces `peer` with the real client.
-    let effective_peer =
-        match proxy_protocol::process(&mut stream, server.cfg.proxy_protocol, peer).await {
-            Ok(ProxyOutcome::Replaced(addr)) => addr,
-            Ok(ProxyOutcome::Untouched) => peer,
-            Ok(ProxyOutcome::Reject(reason)) => {
-                server
-                    .metrics
-                    .handshake_failures
-                    .with_label_values(&["bad_request"])
-                    .inc();
-                warn!(peer = %peer, "PROXY-protocol reject: {reason}");
-                drop(active_guard);
-                return;
-            }
-            Err(e) => {
-                warn!(peer = %peer, "PROXY-protocol IO error: {e}");
-                drop(active_guard);
-                return;
-            }
-        };
+    // Per-source-IP cap. Defends against a single attacker filling the global
+    // cap with half-open handshakes. The guard is held for the duration of the
+    // connection (handshake + tunnel).
+    // Normalize IPv4-mapped-v6 (`::ffff:1.2.3.4`) to its v4 form before the
+    // per-IP cap check. Without this, an attacker dialing the same v4 address
+    // via dual-stack and direct paths counts as two distinct keys, halving the
+    // cap's effectiveness.
+    let mut per_ip_addr = peer.ip();
+    if let std::net::IpAddr::V6(v6) = per_ip_addr {
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            per_ip_addr = std::net::IpAddr::V4(v4);
+        }
+    }
+    let per_ip_guard = match try_acquire_per_ip(&server, per_ip_addr) {
+        Some(g) => g,
+        None => {
+            server
+                .metrics
+                .handshake_failures
+                .with_label_values(&["per_ip_capacity"])
+                .inc();
+            warn!(peer = %peer, "rejecting per-IP capacity");
+            drop(active_guard);
+            let _ = write_503(stream).await;
+            return;
+        }
+    };
 
-    // TLS accept itself gets a hard deadline; subsequent HTTP read uses
+    // PROXY-protocol parsing (optional). Replaces `peer` with the real client.
+    // The `peer.ip()` argument is checked against `proxy_protocol_trusted_cidrs`
+    // — connections from untrusted peers are rejected before parsing, closing
+    // the source-IP-spoof primitive.
+    let effective_peer = match proxy_protocol::process(
+        &mut stream,
+        server.cfg.proxy_protocol,
+        peer,
+        &server.cfg.proxy_protocol_trusted_cidrs,
+    )
+    .await
+    {
+        Ok(ProxyOutcome::Replaced(addr)) => addr,
+        Ok(ProxyOutcome::Untouched) => peer,
+        Ok(ProxyOutcome::Reject(reason)) => {
+            server
+                .metrics
+                .handshake_failures
+                .with_label_values(&["bad_request"])
+                .inc();
+            warn!(peer = %peer, "PROXY-protocol reject: {reason}");
+            drop(per_ip_guard);
+            drop(active_guard);
+            return;
+        }
+        Err(e) => {
+            warn!(peer = %peer, "PROXY-protocol IO error: {e}");
+            drop(per_ip_guard);
+            drop(active_guard);
+            return;
+        }
+    };
+
+    // TLS accept itself gets a tighter deadline (5s); subsequent HTTP read uses
     // hyper's builder-level header_read_timeout.
-    let handshake_deadline = std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECONDS);
+    let tls_deadline = std::time::Duration::from_secs(5);
+    let conn_guards = ConnGuards {
+        active: active_guard,
+        per_ip: per_ip_guard,
+    };
 
     let result = if let Some(acceptor) = &server.tls {
-        match tokio::time::timeout(handshake_deadline, acceptor.accept(stream)).await {
-            Ok(Ok(tls_stream)) => serve_http(server.clone(), tls_stream, effective_peer).await,
+        match tokio::time::timeout(tls_deadline, acceptor.accept(stream)).await {
+            Ok(Ok(tls_stream)) => {
+                serve_http(server.clone(), tls_stream, effective_peer, conn_guards).await
+            }
             Ok(Err(e)) => {
                 server
                     .metrics
@@ -99,21 +159,30 @@ pub async fn serve_connection(server: Arc<Server>, mut stream: TcpStream, peer: 
             }
         }
     } else {
-        serve_http(server.clone(), stream, effective_peer).await
+        serve_http(server.clone(), stream, effective_peer, conn_guards).await
     };
 
     if let Err(e) = result {
         debug!("connection finished with error: {e}");
     }
-    drop(active_guard);
 }
 
-struct ActiveGuard {
+/// Lifetime-bound bundle of per-connection guards. Held by the upgrade future
+/// (and therefore the tunnel) so capacity counters reflect *active tunnels*,
+/// not just in-flight handshakes. The fields are never read directly — both
+/// guards do their work in `Drop`.
+#[allow(dead_code)]
+pub(crate) struct ConnGuards {
+    pub active: ActiveGuard,
+    pub per_ip: PerIpGuard,
+}
+
+pub(crate) struct ActiveGuard {
     counter: Arc<std::sync::atomic::AtomicU64>,
 }
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::SeqCst);
+        self.counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -130,16 +199,27 @@ async fn write_503(mut stream: TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn serve_http<S>(server: Arc<Server>, stream: S, peer: SocketAddr) -> std::io::Result<()>
+async fn serve_http<S>(
+    server: Arc<Server>,
+    stream: S,
+    peer: SocketAddr,
+    guards: ConnGuards,
+) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     let io = TokioIo::new(stream);
     let server_for_svc = server.clone();
     let metrics = server.metrics.clone();
+    // The HTTP layer typically handles a single request before upgrading. Wrap
+    // the guards in a shared `Mutex<Option<...>>` so `handle_request` can take
+    // them on the upgrade path; on a 4xx reject path the guards drop here.
+    let guard_slot = Arc::new(std::sync::Mutex::new(Some(guards)));
+    let guard_for_svc = guard_slot.clone();
     let svc = service_fn(move |req| {
         let server = server_for_svc.clone();
-        Box::pin(async move { handle_request(server, peer, req).await })
+        let guard_slot = guard_for_svc.clone();
+        Box::pin(async move { handle_request(server, peer, req, guard_slot).await })
             as Pin<Box<dyn Future<Output = _> + Send>>
     });
 
@@ -147,6 +227,16 @@ where
     builder
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECONDS));
+    // We do NOT disable keep-alive at the builder level: hyper would then
+    // emit `Connection: close` on the 101 Switching Protocols response,
+    // which conflicts with `Connection: upgrade` and breaks the WS
+    // handshake (fastwebsockets reports "invalid connection header").
+    // Instead, every non-101 response from `text_resp` carries an explicit
+    // `Connection: close` header — see `text_resp` below — so 4xx replies
+    // always tear down the TCP connection. This shuts down auth-probe
+    // pipelining without breaking the upgrade path. For the upgrade path
+    // itself, hyper hands the underlying I/O off after 101 and never re-uses
+    // the connection for another HTTP request.
 
     match builder.serve_connection(io, svc).with_upgrades().await {
         Ok(()) => {}
@@ -159,6 +249,7 @@ where
             debug!("http1 conn error: {e}");
         }
     }
+    // Any guards still in the slot (4xx paths) drop here.
     Ok(())
 }
 
@@ -168,9 +259,9 @@ async fn handle_request(
     server: Arc<Server>,
     peer: SocketAddr,
     mut req: Request<Incoming>,
+    guard_slot: Arc<std::sync::Mutex<Option<ConnGuards>>>,
 ) -> Result<Response<BoxBody>, std::io::Error> {
-    let path = req.uri().path().to_string();
-    if path != server.cfg.ws_path {
+    if req.uri().path() != server.cfg.ws_path.as_str() {
         return Ok(text_resp(StatusCode::NOT_FOUND, "not found"));
     }
 
@@ -185,7 +276,28 @@ async fn handle_request(
     }
 
     // ── Validate v2 headers ───────────────────────────────────────────────
-    let headers = req.headers().clone();
+    // Borrow rather than clone — this runs once per HTTP request on the auth
+    // hot path. Any owned strings we need below are extracted explicitly.
+    let headers = req.headers();
+
+    // Defense-in-depth: reject duplicate occurrences of any auth/routing-relevant
+    // header. RFC 7230 §3.2.2 forbids multi-value here for non-list-tokens, and
+    // a buggy upstream could otherwise let an attacker shadow the LB-set value.
+    for h in [
+        "X-Auth-Token",
+        "X-Auth-Type",
+        "X-Route-Address",
+        "X-Route-Port",
+    ] {
+        if headers.get_all(h).iter().count() > 1 {
+            server
+                .metrics
+                .handshake_failures
+                .with_label_values(&["bad_request"])
+                .inc();
+            return Ok(text_resp(StatusCode::BAD_REQUEST, "duplicate auth token"));
+        }
+    }
 
     let auth_type = headers.get("X-Auth-Type").and_then(|v| v.to_str().ok());
     if !matches!(auth_type, Some(t) if t.eq_ignore_ascii_case("Token")) {
@@ -252,9 +364,13 @@ async fn handle_request(
         }
     }
 
-    let port_num: u16 = match route_port.parse() {
-        Ok(p) => p,
-        Err(_) => {
+    // Canonical decimal only: the route_set lookup compares against
+    // "{addr}:{u16-display}", so accepting "+0" / "00080" / " 80" would let a
+    // peer sneak past route allowlists by submitting a non-canonical port that
+    // u16::from_str() happens to accept. Require the input to round-trip.
+    let port_num: u16 = match route_port.parse::<u16>() {
+        Ok(p) if route_port == p.to_string() => p,
+        _ => {
             server
                 .metrics
                 .handshake_failures
@@ -266,68 +382,86 @@ async fn handle_request(
 
     let route_string = format!("{route_address}:{port_num}");
 
-    // CLIENT_IP_HEADER is honored only when the direct peer is in an explicitly
-    // trusted CIDR (`CLIENT_IP_HEADER_TRUSTED_CIDRS`). Otherwise we fall back to
-    // the direct peer IP. This closes the spoofing trap (Pass 5 SHIP-BLOCKER #21):
-    // an attacker reaching the server directly cannot inject `X-Forwarded-For:
-    // <whitelisted-ip>` to bypass `allowedIps`.
+    // CLIENT_IP_HEADER is honored ONLY when the direct peer is in an explicitly
+    // trusted CIDR (`CLIENT_IP_HEADER_TRUSTED_CIDRS`). The "empty allowlist →
+    // trust anyway" branch was removed — `init_shared` now bails at startup
+    // when a header is configured without a CIDR allowlist (auth-bypass close).
     let header_trusted = !server.cfg.client_ip_header_trusted_cidrs.is_empty()
         && server
             .cfg
             .client_ip_header_trusted_cidrs
             .iter()
             .any(|net| net.contains(&peer.ip()));
-    let client_ip = if let Some(h) = &server.cfg.client_ip_header {
+    // Resolve client IP as `IpAddr` directly: pre-parsing here lets us reject
+    // bracketed forms like "[::1]:1234" with a clean BAD_REQUEST instead of a
+    // silent auth miss further down.
+    let client_ip: std::net::IpAddr = if let Some(h) = &server.cfg.client_ip_header {
         if header_trusted {
-            headers
+            let raw = headers
                 .get(h.as_str())
                 .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string()
-        } else if server.cfg.client_ip_header_trusted_cidrs.is_empty() {
-            // Allowlist not configured — preserve legacy behavior (trust header)
-            // but the startup log warned the operator about spoofing risk.
-            headers
-                .get(h.as_str())
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string()
+                .unwrap_or("");
+            match raw.parse() {
+                Ok(ip) => ip,
+                Err(_) => {
+                    server
+                        .metrics
+                        .handshake_failures
+                        .with_label_values(&["bad_request"])
+                        .inc();
+                    return Ok(text_resp(StatusCode::BAD_REQUEST, "bad request"));
+                }
+            }
         } else {
-            // Allowlist configured but direct peer not in it — ignore header and
-            // use direct peer IP. Bump a metric so operators can spot misconfig.
+            // Header configured but direct peer not in trusted CIDRs — ignore the
+            // header and use the direct peer IP. Bump a metric so operators can
+            // spot misconfig.
             server
                 .metrics
                 .protocol_violations
                 .with_label_values(&["client_ip_header_untrusted"])
                 .inc();
-            peer.ip().to_string()
+            peer.ip()
         }
     } else {
-        peer.ip().to_string()
+        peer.ip()
     };
-    if client_ip.is_empty() {
-        server
-            .metrics
-            .handshake_failures
-            .with_label_values(&["bad_request"])
-            .inc();
-        return Ok(text_resp(StatusCode::BAD_REQUEST, "bad request"));
-    }
 
     // ── Auth ──────────────────────────────────────────────────────────────
-    // Defense-in-depth timing safety: HashMap lookup followed by constant-time
-    // re-verify of the token bytes. See streamsockets-auth::AccountsSnapshot::authenticate.
-    use subtle::ConstantTimeEq;
+    // Lookup is keyed on BLAKE3(token), so the HashMap probe never sees the
+    // raw token bytes — the bucket-walk timing channel collapses to "this
+    // 32-byte preimage-resistant hash exists or not".
+    use streamsockets_auth::token_hash;
+    use subtle::{Choice, ConstantTimeEq};
     let snap = server.auth.snapshot_arc();
-    let cache_opt = snap.by_token.get(&token).cloned();
+    let token_h = token_hash(token.as_bytes());
+    let cache_opt = snap.by_token_hash.get(&token_h).cloned();
     let cache = match cache_opt {
-        Some(c)
-            if c.account.token.len() == token.len()
-                && bool::from(c.account.token.as_bytes().ct_eq(token.as_bytes())) =>
-        {
-            c
+        Some(c) => {
+            // Defense-in-depth: constant-time len + bytes compare with no
+            // early exit. ct_eq on slices of differing length returns
+            // Choice(0) without comparing bytes; the explicit length Choice
+            // guards correctness.
+            let stored = c.account.token.as_bytes();
+            let cand = token.as_bytes();
+            let len_eq: Choice = (stored.len() as u64).ct_eq(&(cand.len() as u64));
+            let bytes_eq: Choice = stored.ct_eq(cand);
+            if bool::from(len_eq & bytes_eq) {
+                c
+            } else {
+                server
+                    .metrics
+                    .handshake_failures
+                    .with_label_values(&["auth"])
+                    .inc();
+                warn!(client_ip = %client_ip, "auth fail (token unknown)");
+                let mut resp = text_resp(StatusCode::UNAUTHORIZED, "unauthorized");
+                resp.headers_mut()
+                    .insert("WWW-Authenticate", HeaderValue::from_static("Token"));
+                return Ok(resp);
+            }
         }
-        _ => {
+        None => {
             server
                 .metrics
                 .handshake_failures
@@ -353,18 +487,7 @@ async fn handle_request(
     }
 
     // IP check
-    let ip_parsed: std::net::IpAddr = match client_ip.parse() {
-        Ok(ip) => ip,
-        Err(_) => {
-            server
-                .metrics
-                .handshake_failures
-                .with_label_values(&["bad_request"])
-                .inc();
-            return Ok(text_resp(StatusCode::BAD_REQUEST, "bad request"));
-        }
-    };
-    let allowed = cache.allowed_cidrs.iter().any(|n| n.contains(&ip_parsed));
+    let allowed = cache.allowed_cidrs.iter().any(|n| n.contains(&client_ip));
     if !allowed {
         server
             .metrics
@@ -389,12 +512,13 @@ async fn handle_request(
         }
     };
 
-    // Echo Sec-WebSocket-Protocol if client sent v2 marker.
-    let echo_subprotocol = headers
+    // RFC 6455 §4.2.2: server picks exactly one subprotocol. We echo only the
+    // literal "streamsockets.v2" — never the entire Sec-WebSocket-Protocol header
+    // value (which could include attacker-supplied tokens).
+    let want_subprotocol = headers
         .get("Sec-WebSocket-Protocol")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .filter(|s| s.split(',').any(|p| p.trim() == "streamsockets.v2"));
+        .is_some_and(|s| s.split(',').any(|p| p.trim() == "streamsockets.v2"));
 
     server
         .metrics
@@ -411,10 +535,11 @@ async fn handle_request(
         }
     };
 
-    if let Some(proto) = echo_subprotocol {
-        if let Ok(v) = HeaderValue::from_str(&proto) {
-            response.headers_mut().insert("Sec-WebSocket-Protocol", v);
-        }
+    if want_subprotocol {
+        response.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_static("streamsockets.v2"),
+        );
     }
     response
         .headers_mut()
@@ -423,6 +548,8 @@ async fn handle_request(
     let account_name = cache.account.name.clone();
     let server_for_tunnel = server.clone();
     let max_frame = server.cfg.max_frame_size;
+    // TODO: switch to `Uuid::now_v7()` for sortable IDs once the `uuid` crate's
+    // `v7` feature is enabled in the workspace. Currently only `v4` is wired in.
     let tunnel_id = uuid::Uuid::new_v4();
     info!(
         account = %account_name,
@@ -432,37 +559,25 @@ async fn handle_request(
         "handshake ok"
     );
 
+    // Take the connection guards (active count + per-IP) out of the slot and
+    // hand them into the tunnel future so capacity reflects active *tunnels*
+    // — not just in-flight handshakes that already completed.
+    let conn_guards = guard_slot.lock().expect("guard slot mutex").take();
+
     tokio::spawn(async move {
-        match fut.await {
-            Ok(ws) => {
-                // Record connection start only when the upgrade actually succeeded.
-                // This keeps `streamsockets_active_connections` consistent — we
-                // increment and decrement under the same condition.
-                server_for_tunnel
-                    .metrics
-                    .record_connection_start(&account_name);
-                let started = std::time::Instant::now();
-                let res = tunnel::run_tunnel(
-                    server_for_tunnel.clone(),
-                    ws,
-                    route_address,
-                    port_num,
-                    max_frame,
-                    account_name.clone(),
-                    client_ip,
-                    tunnel_id,
-                )
-                .await;
-                let dur = started.elapsed().as_secs_f64();
-                server_for_tunnel
-                    .metrics
-                    .record_connection_end(&account_name, dur);
-                if let Err(e) = res {
-                    debug!(account = %account_name, "tunnel ended: {e}");
-                }
-                drop(lease);
-            }
-            Err(e) => {
+        // Hold the connection guards for the lifetime of the upgrade + tunnel.
+        // They drop here on every exit path, restoring capacity. The
+        // `#[allow]` silences clippy's underscore-binding lint — the binding
+        // is intentional: we want the guards to live until the future ends,
+        // not until the next statement.
+        #[allow(clippy::no_effect_underscore_binding)]
+        let _conn_guards = conn_guards;
+
+        // Bound the upgrade future — a stalled client otherwise pins this task
+        // until TCP keepalive fires (~ minutes).
+        let upgraded = match tokio::time::timeout(UPGRADE_TIMEOUT, fut).await {
+            Ok(Ok(ws)) => ws,
+            Ok(Err(e)) => {
                 warn!(account = %account_name, "ws upgrade future failed: {e}");
                 server_for_tunnel
                     .metrics
@@ -470,8 +585,46 @@ async fn handle_request(
                     .with_label_values(&["upgrade_failed"])
                     .inc();
                 drop(lease);
+                return;
             }
+            Err(_) => {
+                warn!(account = %account_name, "ws upgrade future timed out");
+                server_for_tunnel
+                    .metrics
+                    .handshake_failures
+                    .with_label_values(&["upgrade_timeout"])
+                    .inc();
+                drop(lease);
+                return;
+            }
+        };
+
+        // Record connection start only when the upgrade actually succeeded.
+        // This keeps `streamsockets_active_connections` consistent — we
+        // increment and decrement under the same condition.
+        server_for_tunnel
+            .metrics
+            .record_connection_start(&account_name);
+        let started = std::time::Instant::now();
+        let res = tunnel::run_tunnel(
+            server_for_tunnel.clone(),
+            upgraded,
+            route_address,
+            port_num,
+            max_frame,
+            account_name.clone(),
+            client_ip.to_string(),
+            tunnel_id,
+        )
+        .await;
+        let dur = started.elapsed().as_secs_f64();
+        server_for_tunnel
+            .metrics
+            .record_connection_end(&account_name, dur);
+        if let Err(e) = res {
+            debug!(account = %account_name, "tunnel ended: {e}");
         }
+        drop(lease);
     });
 
     let (parts, _) = response.into_parts();
@@ -485,8 +638,12 @@ fn text_resp(status: StatusCode, body: &'static str) -> Response<BoxBody> {
         .boxed();
     // Static body + valid status: builder cannot fail. `expect` documents the
     // invariant for future maintainers (replaces a bare `.unwrap()`).
+    // `Connection: close` is defense-in-depth — even with `keep_alive(false)`
+    // on the builder, signaling close to misbehaving clients prevents pipelined
+    // auth probes against the same TCP connection.
     Response::builder()
         .status(status)
+        .header("Connection", "close")
         .body(body)
         .expect("text_resp inputs are static and always valid")
 }

@@ -19,14 +19,16 @@ async fn drop_oldest_under_overflow() {
     assert!(q.len_bytes() <= 1024);
     assert!(q.dropped_overflow >= 1);
 
-    // Newest items survived: pop the back.
-    // VecDeque drop-oldest semantics: front is oldest. So pop_front() → oldest survivor.
+    // Newest items survived: pop the front (oldest survivor).
     let first = q.pop_front().unwrap();
     let val = u32::from_be_bytes(first[..4].try_into().unwrap());
-    // The oldest still in queue should be near the end (~4744+ from a 256-slot survivor window).
+    // 5000 frames × 4 bytes = 20_000 B pushed against a 1024 B cap → exactly
+    // 1024 / 4 = 256 survivors, indexed (5000 - 256) = 4744..5000. The oldest
+    // survivor must be ≥ 4700 — anything looser would silently pass under
+    // FIFO inversion (oldest=4 surviving).
     assert!(
-        val > 1000,
-        "oldest survivor should be late entry, got {val}"
+        val >= 4700,
+        "oldest survivor should be in the [4744..5000) tail, got {val}"
     );
 }
 
@@ -39,11 +41,12 @@ async fn purge_on_drain_timeout() {
     }
     let before = q.len_bytes();
     assert!(before > 0);
+    // 100 × 5 bytes = 500 B against a 1024 B cap → no overflow drops.
+    assert_eq!(q.dropped_overflow, 0);
     let purged = q.purge();
-    assert_eq!(
-        purged,
-        q.dropped_overflow as usize + 100 - q.dropped_overflow as usize
-    ); // however much remained
+    // All 100 frames remained at purge time, so all 100 are reported as
+    // purged. The previous expression simplified to a tautological 100==100.
+    assert_eq!(purged, 100);
     assert_eq!(q.len_bytes(), 0);
 }
 
@@ -60,7 +63,6 @@ async fn server_kill_then_resume_keeps_recent_frames() {
     let accounts = common::write_accounts(&yaml);
     let server =
         common::spawn_server(server_port, accounts.path().to_path_buf(), metrics_port).await;
-    common::settle(Duration::from_millis(150)).await;
 
     let mut cfg = common::default_client_cfg(server_port, client_udp_port, echo_port);
     cfg.queue_max_bytes = 1024;
@@ -77,9 +79,8 @@ async fn server_kill_then_resume_keeps_recent_frames() {
     let mut buf = [0u8; 64];
     let _ = tokio::time::timeout(Duration::from_secs(2), game.recv_from(&mut buf)).await;
 
-    // Kill server. While dead, blast packets way past queue cap.
-    server.abort();
-    common::settle(Duration::from_millis(50)).await;
+    // Drain server. While dead, blast packets way past queue cap.
+    server.stop().await;
     for i in 0..2000u32 {
         let v = i.to_be_bytes();
         let _ = game.send_to(&v, target).await;

@@ -54,7 +54,6 @@ accounts:
     let accounts = common::write_accounts(&yaml);
     let server =
         common::spawn_server(server_port, accounts.path().to_path_buf(), metrics_port).await;
-    common::settle(Duration::from_millis(200)).await;
 
     let mut udp_ports = Vec::with_capacity(n);
     let mut clients = Vec::with_capacity(n);
@@ -82,9 +81,9 @@ accounts:
     };
     common::settle(Duration::from_millis((500 + n as u64 / 4).min(3_000))).await;
 
-    // Kill server. Track the time each client reconnects.
-    server.abort();
-    common::settle(Duration::from_millis(200)).await;
+    // Drain server gracefully (stop().await releases the listener FD).
+    // Track the time each client reconnects.
+    server.stop().await;
 
     let _server2 = common::spawn_server(
         server_port,
@@ -118,9 +117,20 @@ accounts:
     }
 
     let times = reconnect_times.lock().clone();
+    // n=20 (CI default): tighten to (n - 2) ≈ 90%. The previous 80% would
+    // pass through a regression where ~3 clients silently fail to reconnect.
+    // n=10_000 (soak): the looser 80% bound is intentional. Probe-loop polling
+    // granularity (150ms × 40 attempts = 6s budget) drops O(1%) of clients
+    // that recover in the LAST sample window. The statistical jitter property
+    // is verified analytically in `streamsockets-client::backoff::tests`.
+    let required = if n <= 100 {
+        n.saturating_sub(2)
+    } else {
+        n * 8 / 10
+    };
     assert!(
-        times.len() >= n * 8 / 10,
-        "expected ≥80% of clients to reconnect; got {}/{n}",
+        times.len() >= required,
+        "expected ≥{required} of {n} clients to reconnect; got {}",
         times.len()
     );
 

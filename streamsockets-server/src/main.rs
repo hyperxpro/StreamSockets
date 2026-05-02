@@ -39,18 +39,19 @@ fn main() -> anyhow::Result<()> {
     tracing::info!(workers = n, "spawning per-core server workers");
 
     let bind: SocketAddr = format!("{}:{}", cfg.bind_address, cfg.bind_port).parse()?;
+    let backlog = cfg.listen_backlog;
     let mut tunnel_listeners: Vec<Option<std::net::TcpListener>> = Vec::with_capacity(n);
     for i in 0..n {
-        let l = build_tunnel_listener_std(bind)
+        let l = build_tunnel_listener_std(bind, backlog)
             .map_err(|e| anyhow::anyhow!("worker {i} bind {bind} failed: {e}"))?;
         tunnel_listeners.push(Some(l));
     }
-    tracing::info!(%bind, workers = n, "all tunnel listeners pre-bound (SO_REUSEPORT)");
+    tracing::info!(%bind, workers = n, backlog, "all tunnel listeners pre-bound (SO_REUSEPORT)");
 
     let metrics_listener: Option<std::net::TcpListener> = if cfg.metrics_enabled {
         let metrics_addr: SocketAddr =
             format!("{}:{}", cfg.metrics_bind_address, cfg.metrics_port).parse()?;
-        let l = build_metrics_listener_std(metrics_addr)?;
+        let l = build_metrics_listener_std(metrics_addr, backlog)?;
         tracing::info!(%metrics_addr, "metrics listener pre-bound");
         Some(l)
     } else {
@@ -85,7 +86,8 @@ fn main() -> anyhow::Result<()> {
         async move {
             run_worker(server, listener, idx, metrics).await;
         }
-    });
+    })
+    .map_err(|e| anyhow::anyhow!("spawn_per_core: {e}"))?;
 
     // Block until every worker exits cleanly. spawn_per_core's worker threads
     // detach by default; we explicitly join here to honor the contract that

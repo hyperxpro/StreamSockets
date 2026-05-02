@@ -16,7 +16,7 @@ streamsockets-core = { path = "../streamsockets-core" }
 streamsockets-auth = { path = "../streamsockets-auth" }
 streamsockets-metrics = { path = "../streamsockets-metrics" }
 
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros", "signal", "time", "sync", "io-util"] }
 tokio-util = { workspace = true, features = ["rt"] }
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio", "server"] }
@@ -43,6 +43,8 @@ sha1 = { workspace = true }
 base64 = { workspace = true }
 ppp = "2.2"
 subtle = "2.6"
+arc-swap = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

@@ -4,7 +4,7 @@
 
 > **Non-negotiables.** (1) Rust + Tokio. (2) `tokio-uring` on Linux when io_uring is available, plain Tokio (epoll) otherwise. (3) Frame-by-frame: 1 UDP datagram = 1 WS binary frame, no batching beyond OS-level coalescing. (4) **No JSON anywhere on the wire — old v1 protocol (`X-Auth-Route` + JSON `TextWebSocketFrame` route negotiation) is removed entirely.** All auth/routing in v2 lives in HTTP headers on the WS handshake. (5) Same env vars (minus `USE_OLD_PROTOCOL`), same `accounts.yml`, same Prometheus metric names/labels as 1.7.0 (additive only). (6) Production-grade day-1: structured tracing, no `.unwrap()` on hot paths, panic = process exit, graceful shutdown. (7) Fix the reconnect/disconnect bugs catalogued below. (8) Version is **2.0.0**.
 
-> **Breaking change.** v2 is a clean wire-protocol break. v1.7.0 clients **cannot** talk to v2 servers (they'll get HTTP `400` for missing `X-Route-Address`). v2 clients **cannot** talk to v1.7.0 servers (the v1 server doesn't recognize the new headers). Rollout strategy changes accordingly — see §14. The user-facing migration guide is at `docs/v2.md`.
+> **Breaking change.** v2 is a clean wire-protocol break. v1.7.0 clients **cannot** talk to v2 servers (they'll get HTTP `400` for missing `X-Route-Address`). v2 clients **cannot** talk to v1.7.0 servers (the v1 server doesn't recognize the new headers). Rollout strategy changes accordingly — see §14.
 
 ---
 
@@ -14,7 +14,7 @@
 - Rewrite `server/` and `client/` modules as Rust 2021 crates targeting Linux x86_64 and aarch64.
 - Rewrite `authentication-server/`, `metrics/`, `common/` as supporting Rust crates in the same Cargo workspace.
 - Preserve every operator-facing surface that *survives* the v1 wire-protocol removal: `accounts.yml` schema, Prometheus metric names + labels (additive only), `X-Auth-Type` / `X-Auth-Token` / `X-Route-Address` / `X-Route-Port` / `CLIENT_IP_HEADER` semantics, default ports, Docker image entrypoints.
-- Author `docs/v2.md` — the user-facing migration guide for operators upgrading from 1.7.0.
+- Operator-facing rollout, env-var reference, accounts.yml schema, and rollback procedure are documented inline in this file — see §10 (env vars), §13 (metrics), and §14 (rollout). A separate `docs/v2.md` is no longer maintained.
 
 ### Removed (breaking changes vs 1.7.0)
 - **v1 wire protocol entirely**: legacy `X-Auth-Route` handshake header, JSON-payload `TextWebSocketFrame` route negotiation, the per-connection "old protocol" code path on the server, and the `USE_OLD_PROTOCOL` env var on the client. v2 servers reject v1 handshakes with `400`; v2 clients only speak v2.
@@ -124,30 +124,36 @@ Metrics on a separate Netty pipeline at :9090.
 
 ## 3. Cargo workspace layout
 
-Create at `/home/ubuntu/Programming/StreamSockets/rust/`.
+The workspace lives at the repo root (`/home/ubuntu/Programming/StreamSockets/`).
+The original plan placed it under `rust/`; the post-cutover layout was flattened
+once the Java tree was removed. Treat the snippet below as the source of truth.
 
 ```
-rust/
-├── Cargo.toml                          # workspace root
-├── rust-toolchain.toml                 # channel = "1.84"
-├── streamsockets-core/                 # shared types + env helpers + tracing init
+/                                        # repo root
+├── Cargo.toml                           # workspace root
+├── Cargo.lock
+├── rust-toolchain.toml                  # channel = "1.86"
+├── deny.toml                            # cargo-deny config
+├── streamsockets-core/                  # shared types + env helpers + tracing init
 │   ├── Cargo.toml
 │   └── src/lib.rs
-├── streamsockets-auth/                 # accounts.yml loader + reload + token auth
+├── streamsockets-auth/                  # accounts.yml loader + reload + token auth
 │   ├── Cargo.toml
 │   └── src/lib.rs
-├── streamsockets-metrics/              # prometheus registry + /metrics + /healthz HTTP
+├── streamsockets-metrics/               # prometheus registry + /metrics + /healthz HTTP
 │   ├── Cargo.toml
 │   └── src/lib.rs
-├── streamsockets-server/               # binary: streamsockets-server
+├── streamsockets-server/                # binary: streamsockets-server
 │   ├── Cargo.toml
-│   └── src/{main.rs, accept.rs, handshake.rs, tunnel.rs, upstream.rs, runtime.rs}
-├── streamsockets-client/               # binary: streamsockets-client
+│   └── src/{main.rs, lib.rs, handshake.rs, tunnel.rs, tls.rs, proxy_protocol.rs}
+├── streamsockets-client/                # binary: streamsockets-client
 │   ├── Cargo.toml
-│   └── src/{main.rs, listener.rs, fsm.rs, ws.rs, queue.rs, runtime.rs}
-└── streamsockets-testsuite/            # integration tests, version-compat, chaos
-    ├── Cargo.toml
-    └── tests/...
+│   └── src/{main.rs, lib.rs, fsm.rs, ws.rs, queue.rs, backoff.rs}
+├── streamsockets-testsuite/             # integration tests, chaos, soak
+│   ├── Cargo.toml
+│   └── tests/...
+├── docker/                              # Dockerfile-{Server,Client}-Rust
+└── .github/workflows/                   # rust.yml, rust-soak.yml, docker-rust.yml
 ```
 
 ### Pinned dependency versions (top of `Cargo.toml`, `[workspace.dependencies]`)
@@ -186,7 +192,8 @@ rust/
 | `rand` | `0.8` | decorrelated-jitter backoff |
 | `criterion` | `0.5` | dev: hot-path benchmarks |
 
-Rust edition `2021`, MSRV `1.81` (declared in each crate's `Cargo.toml`).
+Rust edition `2021`, MSRV `1.86` (declared via `rust-toolchain.toml` and
+each crate's `rust-version`). The CI matrix exercises `1.86` and `stable`.
 
 ---
 
@@ -697,7 +704,7 @@ GitHub Actions:
 - `cargo deny check` (advisories, licenses, bans) on every PR.
 - `cargo audit` weekly cron.
 - `cargo fmt --check`, `cargo clippy -- -D warnings -W clippy::pedantic` (selectively allow noisy lints).
-- Rust toolchains: `1.84` (current MSRV) and `stable`. MSRV bumps require RFC.
+- Rust toolchains: `1.86` (current MSRV) and `stable`. MSRV bumps require RFC.
 
 ---
 
@@ -708,21 +715,20 @@ GitHub Actions:
 `docker/Dockerfile-Server-Rust`:
 
 ```dockerfile
-# Stage 1: build
-FROM rust:1.84-bookworm AS build
+# Stage 1: build (digests pinned in the actual file; tag shown here for clarity)
+FROM rust:1.86-bookworm AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-COPY rust/Cargo.toml rust/Cargo.lock ./
-COPY rust/crates ./crates
+    cmake pkg-config && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock ./
+COPY streamsockets-* ./
 RUN cargo build --release --locked --bin streamsockets-server
 
 # Stage 2: runtime — distroless, nonroot UID, has /etc/resolv.conf + CA bundle
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/streamsockets-server /usr/local/bin/streamsockets-server
-COPY accounts.yml /etc/streamsockets/accounts.yml
 
-# Match Java image defaults
+# accounts.yml is mounted by the operator at run time, not baked in.
 ENV ACCOUNTS_CONFIG_FILE=/etc/streamsockets/accounts.yml \
     DISABLE_IOURING=true \
     LOG_FORMAT=json
@@ -730,6 +736,11 @@ EXPOSE 8080/tcp 9090/tcp
 USER nonroot
 ENTRYPOINT ["/usr/local/bin/streamsockets-server"]
 ```
+
+The actual on-disk Dockerfiles add a `cargo-chef` planner stage so dep
+rebuilds don't dominate CI build time, and pin the base images to digest
+rather than tag — see `docker/Dockerfile-Server-Rust` for the canonical
+form.
 
 Same shape for `Dockerfile-Client-Rust` (different binary, exposes `8888/udp`).
 
@@ -912,7 +923,7 @@ Single-endpoint rollouts (LB-side routing on `X-StreamSockets-Version`, etc.) ar
 
 ### 14.3 Required client-side coordination
 
-Because v2 client ↔ v1 server fails handshake, **you must upgrade the client and switch its `WEBSOCKET_URI` in the same deploy**. For systemd-managed clients, that's a single `systemctl restart` after dropping in the new binary + updated env file. For Docker, it's a single `docker-compose up -d` with both the new image tag and the new URI in the same edit. The detailed user-facing procedure (Docker, docker-compose, systemd, Kubernetes) lives in `docs/v2.md`.
+Because v2 client ↔ v1 server fails handshake, **you must upgrade the client and switch its `WEBSOCKET_URI` in the same deploy**. For systemd-managed clients, that's a single `systemctl restart` after dropping in the new binary + updated env file. For Docker, it's a single `docker-compose up -d` with both the new image tag and the new URI in the same edit. The detailed user-facing procedure (Docker, docker-compose, systemd, Kubernetes) is captured below in §14.
 
 ### 14.4 Rollback
 
@@ -932,7 +943,7 @@ Because v2 client ↔ v1 server fails handshake, **you must upgrade the client a
 | Hyper 1.x WS upgrade + fastwebsockets integration is less battle-tested than Netty's | Build a minimal harness in `streamsockets-testsuite` that runs 1 M handshakes against the same backend as a test gate; detect regressions early. |
 | `nf_conntrack_udp_timeout_stream` default (180 s) silently kills idle long-lived tunnels behind NAT | Documented sysctl in §12.3. On Linux, the v2 server can `setsockopt(IP_RECVERR)` and react to ICMP errors; that catches the conntrack-flush case as `streamsockets_upstream_unreachable_total`. |
 | Single-source lock-on (§6.4) is a behavior change from Java | Document. Operators relying on the multi-source path (which was buggy) get explicit drop metrics + warn logs; can run multiple client processes. |
-| 401 → {403, 409} status-code split | Clients that match specifically on 401 may break. Only relevant to third-party / custom v2 clients (the Java v1 client cannot complete a v2 handshake at all). Document loudly in changelog and `docs/v2.md`. |
+| 401 → {403, 409} status-code split | Clients that match specifically on 401 may break. Only relevant to third-party / custom v2 clients (the Java v1 client cannot complete a v2 handshake at all). Document loudly in the v2 changelog. |
 | `mimalloc` fragmentation under long uptime | 24h soak under `dhat` and `valgrind massif`. Build-time feature flag falls back to system allocator if the soak shows growth. |
 | MUSL deferred — image size will be larger | Acceptable for v2.0.0; revisit after p99 latency benchmarks confirm glibc parity. |
 | `arc-swap` is not a stdlib primitive | Battle-tested (used in `tracing` ecosystem); add `cargo deny` advisory check; trivial to replace with `RwLock<Arc<...>>` if it ever becomes a problem. |
@@ -945,7 +956,7 @@ Because v2 client ↔ v1 server fails handshake, **you must upgrade the client a
 3. **MAX_CONCURRENT_CONNECTIONS default**: 100 K is generous; some operators may want a lower cap. Make it loud in the README.
 4. **TLS cert hot-reload**: Java doesn't have it (relied on proxy). Skip for v2.0.0; add in v2.1 if asked.
 5. **IPv6**: Java works (Netty handles it). Confirm the Rust workspace works the same — `BIND_ADDRESS=::` should bind dual-stack. Test explicitly.
-6. **v1-protocol removal communication**: how long do we keep `legacy-java/` around as a buildable rollback artifact? Recommend keep through v2.2 (~6 months); call it out in `docs/v2.md`.
+6. **v1-protocol removal communication**: how long do we keep `legacy-java/` around as a buildable rollback artifact? Recommend keep through v2.2 (~6 months); call it out in the release notes accompanying the v2 tag.
 
 ---
 
@@ -953,7 +964,7 @@ Because v2 client ↔ v1 server fails handshake, **you must upgrade the client a
 
 Tasks in execution order. Each task is small enough to commit atomically.
 
-- [ ] **0**: Create branch `rust-2.0.0`. Add `rust/` directory at repo root.
+- [ ] **0**: Create branch `rust-2.0.0`. Scaffold the Cargo workspace at the repo root (the original plan placed it under `rust/`; the layout was flattened post-cutover after the Java tree was removed).
 - [ ] **1**: Scaffold Cargo workspace with the six crates from §3. Pin all dep versions per §3 table. Verify `cargo build` produces both binaries empty.
 - [ ] **2**: Implement `streamsockets-core` (env helpers matching Java's `Utils.envValue` / `envValueAsInt`, tracing init, runtime kind detection per §4).
 - [ ] **3**: Implement `streamsockets-auth` (YAML loader, `AccountsSnapshot`, lease tracker, hot reload). Port unit tests from `authentication-server/src/test`.

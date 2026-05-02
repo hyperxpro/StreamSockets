@@ -1,4 +1,4 @@
-name: Rust Release Soak (FD-leak smoke)
+name: Rust Release Soak (FD-leak smoke + reconnect storm)
 
 on:
   push:
@@ -6,25 +6,31 @@ on:
       - "v2.*"
   workflow_dispatch:
 
-# Per docs/v2.md §11.5: every release tag runs a 5-minute FD-leak smoke
-# (SOAK_DURATION_HOURS=0.083) that exercises 1000 tunnels × 10 pps with
-# the same code path that the operator's 24-hour pre-cutover soak runs.
+permissions:
+  contents: read
+
+# Per MIGRATION.md §11.3 / §11.5: every release tag runs a 5-minute
+# FD-leak smoke (SOAK_DURATION_HOURS=0.083) exercising 1000 tunnels ×
+# 10 pps, plus the 10K-client reconnect-storm chaos test (#[ignore]'d
+# in the normal CI matrix because of FD-table requirements). Together
+# they cover the two soak scenarios the spec requires before tagging.
 # A leak that doubles every minute is caught here; a slow leak (drift of
 # a few FDs per hour) is caught only by the manual 24-hour run.
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  SOAK_DURATION_HOURS: "0.083"
 
 jobs:
   fd-leak-smoke:
     runs-on: ubuntu-22.04
     timeout-minutes: 25
+    env:
+      SOAK_DURATION_HOURS: "0.083"
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch: stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: soak
       - name: Run FD-leak soak (5 minutes)
@@ -34,3 +40,26 @@ jobs:
           ulimit -n 65536
           cargo test --release --test soak_fd_leak \
             -- --ignored --nocapture
+
+  reconnect-storm-10k:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch: stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          key: soak-storm
+      - name: Run 10K-client reconnect storm
+        # 10K clients × ~3 sockets each + ephemeral port churn requires
+        # both a high FD ceiling and a wide ephemeral port range. The
+        # `chaos_reconnect_storm_10k` test in MIGRATION.md §11.3 is
+        # `#[ignore]`'d in normal CI for these requirements.
+        run: |
+          ulimit -n 65536
+          # Widen ephemeral port range to ~30K available ports (default
+          # 32768-60999 ≈ 28K, sufficient — bump only if observed
+          # bind() EADDRINUSE).
+          sudo sysctl -w net.ipv4.ip_local_port_range="32768 60999" || true
+          cargo test --release --test chaos_reconnect_storm \
+            -- --ignored --nocapture chaos_reconnect_storm_10k
