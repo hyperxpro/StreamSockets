@@ -5,7 +5,7 @@
 //! `tokio_uring::Runtime`; calling these methods from a plain tokio runtime
 //! will panic at the first uring submission.
 //!
-//! ## Buffer registration (MIGRATION.md §7.3)
+//! ## Buffer registration
 //!
 //! Each worker constructs an [`IoUringUdp`] with a [`UringBufRegistry`] of 1024
 //! × 64 KiB buffers. The registry calls

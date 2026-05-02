@@ -1,9 +1,9 @@
 //! `StreamSockets` server entry point.
 //!
-//! Per MIGRATION.md §4 / §7.1: N current-thread runtimes, one per core, each
-//! pinned and each binding the listen port with `SO_REUSEPORT` before any
-//! `accept()` runs. Worker-0 also hosts the metrics service, the SIGTERM
-//! handler, the auth-reload watcher, and the systemd watchdog heartbeat.
+//! N current-thread runtimes, one per core, each pinned and each binding the
+//! listen port with `SO_REUSEPORT` before any `accept()` runs. Worker-0 also
+//! hosts the metrics service, the SIGTERM handler, the auth-reload watcher,
+//! and the systemd watchdog heartbeat.
 
 #![allow(clippy::doc_markdown)]
 
@@ -25,9 +25,9 @@ fn main() -> anyhow::Result<()> {
     init_tracing();
     install_panic_hook();
 
-    // TOKIO_CONSOLE_BIND (MIGRATION.md §10.1): if set, the operator wants the
-    // tokio-console subscriber bound for live task introspection. The current
-    // build does not link `console-subscriber` (heavy dep, deferred to v2.1).
+    // TOKIO_CONSOLE_BIND: if set, the operator wants the tokio-console
+    // subscriber bound for live task introspection. The current build does
+    // not link `console-subscriber` (heavy dep, deferred to v2.1).
     // Surface a warn so the misconfiguration is visible at startup rather
     // than silent.
     if let Some(bind) = std::env::var_os("TOKIO_CONSOLE_BIND") {
@@ -75,8 +75,8 @@ fn main() -> anyhow::Result<()> {
     let server = init_shared(cfg)?;
 
     // All required listeners are bound — flip /readyz and notify systemd.
-    // Per MIGRATION.md §9.3 / §12.2: READY=1 fires after first successful
-    // bind. With pre-binding, that's right here, before any worker accepts.
+    // READY=1 fires after the first successful bind. With pre-binding, that's
+    // right here, before any worker accepts.
     sd_notify_ready();
     server.health.mark_ready();
 

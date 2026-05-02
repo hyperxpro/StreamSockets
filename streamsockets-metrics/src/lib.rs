@@ -104,17 +104,18 @@ pub struct Metrics {
 /// Canonical list of every metric the registry exposes. Used by tests to
 /// confirm spec coverage and by `cargo test` to detect drift.
 ///
-/// MUST stay in sync with MIGRATION.md §9.1 (preserved) + §9.2 (new) + §13.3
-/// (failure-mode catalog: `streamsockets_udp_idle_closes_total`).
+/// MUST stay in sync with the v2 spec — preserved metrics carried over from
+/// v1.7.0 + new metrics introduced in v2 + the failure-mode catalog
+/// (`streamsockets_udp_idle_closes_total`).
 pub const ALL_METRIC_NAMES: &[&str] = &[
-    // §9.1 preserved
+    // v1.7.0 preserved
     "streamsockets_active_connections",
     "streamsockets_connection_status",
     "streamsockets_total_connections",
     "streamsockets_bytes_received_total",
     "streamsockets_bytes_sent_total",
     "streamsockets_connection_duration_seconds",
-    // §9.2 new
+    // v2 new
     "streamsockets_handshake_failures_total",
     "streamsockets_handshake_version",
     "streamsockets_handshake_timeouts_total",
@@ -139,7 +140,7 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
     "streamsockets_udp_egress_socket_buffer_bytes",
     "streamsockets_runtime_kind",
     "streamsockets_client_state",
-    // §13.3 row 13
+    // v2 failure-mode catalog
     "streamsockets_udp_idle_closes_total",
 ];
 
@@ -520,10 +521,9 @@ impl Metrics {
 
 /// Lifecycle / health state.
 ///
-/// `ready` flips to true once the **tunnel accept loop** is running (per
-/// MIGRATION.md §9.3) — the metrics service does NOT mark itself ready on
-/// bind, since /readyz must surface the public-port readiness, not the
-/// observability port's.
+/// `ready` flips to true once the **tunnel accept loop** is running — the
+/// metrics service does NOT mark itself ready on bind, since /readyz must
+/// surface the public-port readiness, not the observability port's.
 #[derive(Default)]
 pub struct HealthState {
     /// Set when SIGTERM has triggered drain. /healthz returns 503 once true.
@@ -679,11 +679,11 @@ pub async fn serve_metrics_on_listener(
     if let Ok(addr) = listener.local_addr() {
         info!(%addr, "metrics service listening");
     }
-    // /readyz must flip *only* once the tunnel accept loop is up (per
-    // MIGRATION.md §9.3). The server's `run()` calls `health.mark_ready()`
-    // after `build_listener()` succeeds; this function deliberately does
-    // not mark ready here — clients hitting /readyz before the tunnel
-    // listener binds correctly receive 503.
+    // /readyz must flip *only* once the tunnel accept loop is up. The
+    // server's `run()` calls `health.mark_ready()` after `build_listener()`
+    // succeeds; this function deliberately does not mark ready here —
+    // clients hitting /readyz before the tunnel listener binds correctly
+    // receive 503.
     let scrape_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_SCRAPES));
     loop {
         // Acquire a permit BEFORE accept so the kernel queues backpressure
@@ -892,11 +892,9 @@ mod tests {
         }
 
         // Verify exact count is in lockstep with spec — guards against silent
-        // additions that aren't reflected in MIGRATION.md.
-        // 6 (§9.1 preserved) + 24 (§9.2 new — incl. upstream_truncated_total and
-        //                          downstream_queue_drops_total added in v2.0.0) +
-        // 1 (§13.3 udp_idle_closes_total)
-        // = 31.
+        // additions to ALL_METRIC_NAMES.
+        // 6 preserved from v1.7.0 + 24 new in v2 (incl. upstream_truncated_total and
+        // downstream_queue_drops_total) + 1 (udp_idle_closes_total) = 31.
         assert_eq!(
             ALL_METRIC_NAMES.len(),
             31,

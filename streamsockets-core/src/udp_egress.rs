@@ -1,4 +1,4 @@
-//! `UdpEgress` trait + `TokioUdp` impl per MIGRATION.md §4.
+//! `UdpEgress` trait + `TokioUdp` impl.
 //!
 //! The trait is the single platform abstraction over UDP. On Linux+iouring,
 //! [`crate::uring_udp::IoUringUdp`] uses tokio-uring with kernel-registered
@@ -73,10 +73,10 @@ impl RecvBatch {
 
 /// Asynchronous UDP egress trait — one impl per backend (tokio, tokio-uring).
 ///
-/// Note: NOT `Send`. Per MIGRATION.md §4 ("Per-tunnel state pins to one
-/// worker, so the WS task and the UDP task share a thread; cross-task
-/// communication is `Rc<RefCell<...>>` or direct ownership (no `Send`
-/// required).") The per-core current-thread runtime + SO_REUSEPORT model
+/// Note: NOT `Send`. Per-tunnel state pins to one worker, so the WS task and
+/// the UDP task share a thread; cross-task communication is
+/// `Rc<RefCell<...>>` or direct ownership (no `Send` required). The per-core
+/// current-thread runtime + SO_REUSEPORT model
 /// keeps every tunnel local to one worker thread; `tokio_uring`'s `UdpSocket`
 /// and `FixedBufRegistry` use `Rc<RefCell<...>>` internally so the trait is
 /// thread-bound by construction.

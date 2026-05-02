@@ -2,7 +2,7 @@
 StreamSockets is a UDP over WebSockets tunnel. It allows you to send and receive UDP packets over a WebSocket connection. 
 This is useful for situations where you need to send UDP packets over a network that only supports WebSockets.
 
-> **2.0.0 — Rust rewrite.** This repository is a Cargo workspace; member crates live at the repo root. v2.0.0 ships as `hyperxpro/streamsockets:server-2.0.0` / `:client-2.0.0`. v2 is a **breaking wire-protocol change** vs 1.7.0 — see [`MIGRATION.md`](MIGRATION.md) §14 for the operator upgrade guide, §10/§13 for env-var and metrics references, and the rest of that file for the engineering rationale. The Java 1.7.0 sources have been removed from the repo; the v1.7.0 Docker images (`hyperxpro/streamsockets:server-1.7.0` / `:client-1.7.0`) stay published indefinitely on Docker Hub as the rollback target. Source-level rollback to 1.7.0 is via the `Release v1.7.0` git tag.
+> **2.0.0 — Rust rewrite.** This repository is a Cargo workspace; member crates live at the repo root. v2.0.0 ships as `hyperxpro/streamsockets:server-2.0.0` / `:client-2.0.0`. v2 is a **breaking wire-protocol change** vs 1.7.0 — v1 clients cannot talk to v2 servers and vice versa. The Java 1.7.0 sources have been removed from the repo; the v1.7.0 Docker images (`hyperxpro/streamsockets:server-1.7.0` / `:client-1.7.0`) stay published indefinitely on Docker Hub as the rollback target. Source-level rollback to 1.7.0 is via the `Release v1.7.0` git tag.
 
 **Repo layout**:
 
@@ -11,8 +11,6 @@ This is useful for situations where you need to send UDP packets over a network 
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `deny.toml` | Cargo workspace root |
 | `streamsockets-{core,auth,metrics,server,client,testsuite}/` | workspace member crates |
 | `docker/` | v2.0.0 Dockerfiles |
-| (none) | The operator migration guide is consolidated into `MIGRATION.md` (§10 env vars, §13 metrics, §14 rollout). |
-| `MIGRATION.md` | Engineering rationale + spec for the Rust rewrite |
 
 ### Quick start (v2 / Rust)
 
@@ -57,9 +55,9 @@ cargo build --release --locked
 The Rust workspace probes for io_uring on startup and exposes the result as
 `streamsockets_runtime_kind{kind="io_uring|epoll|tokio"}`. Both binaries spawn
 N current-thread runtimes (one per core, pinned via `core_affinity`) with
-`SO_REUSEPORT` fanout — see [`MIGRATION.md`](MIGRATION.md) §4 and §7. Set
-`DISABLE_IOURING=true` to force the epoll path; Docker images default to this
-because most cloud seccomp profiles still block io_uring syscalls.
+`SO_REUSEPORT` fanout. Set `DISABLE_IOURING=true` to force the epoll path;
+Docker images default to this because most cloud seccomp profiles still block
+io_uring syscalls.
 
 | Platform | I/O backend today | Notes |
 |---|---|---|
@@ -79,13 +77,6 @@ in that configuration; treat it as misconfiguration in production. Example:
 - CLIENT_IP_HEADER=X-Forwarded-For
 - CLIENT_IP_HEADER_TRUSTED_CIDRS=10.0.0.0/8,fd00::/8
 ```
-
-
----
-
-## Operator documentation
-
-For the full operator-facing guide — handshake details, env-var reference, accounts.yml schema, Prometheus metrics, sysctl recommendations, LB tuning, rollback procedures, and the upgrade path from v1.7.0 — see [`MIGRATION.md`](MIGRATION.md): §10 (env vars), §13 (metrics), §14 (rollout), and §15 (rollback / open questions).
 
 The accounts.yml schema is unchanged from v1.7.0; existing files keep working without edits.
 

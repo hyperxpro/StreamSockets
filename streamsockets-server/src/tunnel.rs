@@ -1,7 +1,6 @@
 //! Bidirectional WebSocket ↔ UDP forwarder.
 //!
-//! Mirrors `server/WebSocketServerHandler.java` + `DownstreamHandler.java`
-//! per MIGRATION.md §7.1.
+//! Mirrors `server/WebSocketServerHandler.java` + `DownstreamHandler.java`.
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -48,8 +47,8 @@ pub async fn run_tunnel(
     };
 
     let mut ws = ws;
-    // Per MIGRATION.md §5.3: continuation reassembly bounded at MAX_FRAME_SIZE × 2
-    // to bound slow-loris fragmentation. Defaults to 65536 × 2 = 131072.
+    // Continuation reassembly bounded at MAX_FRAME_SIZE × 2 to bound
+    // slow-loris fragmentation. Defaults to 65536 × 2 = 131072.
     ws.set_max_message_size(max_frame.saturating_mul(2));
     ws.set_auto_close(true);
     ws.set_auto_pong(true);

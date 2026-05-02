@@ -81,8 +81,8 @@ pub async fn run_fsm(cfg: Arc<ClientConfig>, shutdown: CancellationToken) -> any
 /// with SO_REUSEPORT alongside the other workers' sockets) and a `worker_idx`.
 ///
 /// `worker_idx == 0` is the singleton-owning worker: it fires
-/// `sd_notify(READY=1)` after its first transition to `Live` (per
-/// MIGRATION.md §12.2) and starts the systemd watchdog heartbeat.
+/// `sd_notify(READY=1)` after its first transition to `Live` and starts the
+/// systemd watchdog heartbeat.
 pub async fn run_fsm_with_socket(
     cfg: Arc<ClientConfig>,
     shutdown: CancellationToken,
@@ -210,8 +210,8 @@ async fn run_fsm_inner(
 
         // Connecting → Authenticating (FSM state metric).
         // The CancellationToken `attempt` covers the entire Connecting →
-        // Authenticating → Live arc per MIGRATION.md §6.6 — minted once per
-        // epoch, dropped on transition out of Live or on dial failure.
+        // Authenticating → Live arc — minted once per epoch, dropped on
+        // transition out of Live or on dial failure.
         set_state(&metrics, State::Connecting);
         info!(epoch, "connecting to {}", cfg.websocket_uri);
         let metrics_for_auth = metrics.clone();

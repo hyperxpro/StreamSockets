@@ -3,10 +3,10 @@
 //! and the reconnect timestamps should be jittered (not all simultaneous).
 //!
 //! N=20 runs by default for fast CI. The same code, N=10_000, runs as the
-//! `#[ignore]`'d `chaos_reconnect_storm_10k` for soak validation per
-//! MIGRATION.md §11.3. Both assert the same property: decorrelated-jitter
-//! backoff produces a multi-bucket reconnect-time histogram (synchronized
-//! retry waves would fail).
+//! `#[ignore]`'d `chaos_reconnect_storm_10k` for soak validation. Both
+//! assert the same property: decorrelated-jitter backoff produces a
+//! multi-bucket reconnect-time histogram (synchronized retry waves would
+//! fail).
 
 mod common;
 

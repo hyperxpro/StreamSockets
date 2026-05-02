@@ -356,9 +356,9 @@ fn parse_cidr_lenient(s: &str) -> Result<IpNet, ipnet::AddrParseError> {
 
 /// Lease tracker: counts active sessions per account and enforces `reuse=false`.
 ///
-/// Per MIGRATION.md §8.4: tracker is keyed on the BLAKE3(token) so that across
-/// reloads — which re-issue `Arc<Account>` instances with the same token — the
-/// outstanding leases continue to map to the same slot.
+/// The tracker is keyed on `BLAKE3(token)` so that across reloads — which
+/// re-issue `Arc<Account>` instances with the same token — the outstanding
+/// leases continue to map to the same slot.
 #[derive(Debug)]
 pub struct LeaseTracker {
     active: DashMap<[u8; 32], AtomicUsize>,

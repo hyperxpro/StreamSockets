@@ -1,6 +1,7 @@
 //! streamsockets-client v2.
 //!
-//! See MIGRATION.md §6 (FSM, reconnect, lock-on, queue).
+//! FSM, reconnect, lock-on, and queue semantics are documented at the call
+//! sites in `fsm.rs`, `ws.rs`, and `queue.rs`.
 #![deny(clippy::await_holding_lock)]
 // Same pedantic-suppression rationale as `streamsockets-core/src/lib.rs`.
 #![allow(
@@ -482,7 +483,7 @@ pub fn init_shared(cfg: &ClientConfig) {
         "starting streamsockets-client v2.0.0"
     );
 
-    // Warn-and-ignore the removed v1 env var; see docs/v2.md §7.1.
+    // Warn-and-ignore the v1 env var that v2 no longer honors.
     if std::env::var_os("USE_OLD_PROTOCOL").is_some() {
         warn!("USE_OLD_PROTOCOL is set but ignored — v2 client only speaks v2");
     }

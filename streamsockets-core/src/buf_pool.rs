@@ -1,6 +1,6 @@
 //! Per-worker buffer pool for UDP recv.
 //!
-//! Each worker holds a fixed-size pool (default 1024 × 64 KiB per MIGRATION.md §4).
+//! Each worker holds a fixed-size pool (default 1024 × 64 KiB).
 //! On the io_uring path the buffers are registered with `IORING_REGISTER_BUFFERS`
 //! at startup so the kernel skips `get_user_pages` per recv. On the epoll path
 //! the same pool eliminates per-recv heap traffic.
@@ -123,8 +123,7 @@ impl BufHandle {
     /// Convert this handle into a `Bytes` slice of length `len`, preserving the
     /// return-to-pool-on-last-drop semantics. Backed by [`Bytes::from_owner`],
     /// which ships in `bytes >= 1.7` and is the documented stable hook for a
-    /// pool-aware `Bytes` (replaces the previous handcrafted `bytes::Vtable`
-    /// approach mentioned in older drafts of MIGRATION.md §7.3).
+    /// pool-aware `Bytes`.
     ///
     /// Returns [`FreezeError::OversizedLength`] when `len > capacity`. The
     /// length argument is typically kernel-derived (`recvmsg` wire length); in

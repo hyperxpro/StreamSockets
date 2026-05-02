@@ -1,8 +1,8 @@
 //! Per-core current-thread runtimes pinned via `core_affinity`.
 //!
-//! MIGRATION.md §4 / §7.1 / §7.2: "N runtimes, one per core, each pinned, each
-//! binding 0.0.0.0:BIND_PORT with SO_REUSEPORT". Each worker is a single OS
-//! thread running a `tokio::runtime::Builder::new_current_thread()` runtime.
+//! N runtimes, one per core, each pinned, each binding `0.0.0.0:BIND_PORT`
+//! with `SO_REUSEPORT`. Each worker is a single OS thread running a
+//! `tokio::runtime::Builder::new_current_thread()` runtime.
 //! Per-tunnel state pins to one worker, so the WS task and UDP task share a
 //! thread; cross-task communication uses local mpsc with no `Send` constraint.
 

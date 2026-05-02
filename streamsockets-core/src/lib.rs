@@ -1,7 +1,6 @@
 //! Shared types, env-helpers, tracing init, runtime kind detection.
 //!
-//! Mirrors `common/src/main/java/.../Utils.java` plus the new runtime-selection logic
-//! described in MIGRATION.md §4.
+//! Mirrors `common/src/main/java/.../Utils.java` plus the new runtime-selection logic.
 
 #![warn(missing_docs)]
 // Pedantic lints we deliberately suppress (with reasoning):
@@ -181,8 +180,8 @@ pub enum RuntimeKind {
 }
 
 impl RuntimeKind {
-    /// Stable Prometheus label for this runtime kind. Per MIGRATION.md §9.2,
-    /// the documented label set is `io_uring | epoll | tokio`:
+    /// Stable Prometheus label for this runtime kind; the documented label
+    /// set is `io_uring | epoll | tokio`:
     ///
     /// - `Uring` → `"io_uring"`
     /// - `Tokio` on Linux → `"epoll"` (kernel uses epoll under tokio's reactor)
@@ -286,7 +285,7 @@ fn uring_kernel_supported() -> bool {
     false
 }
 
-/// Selects the runtime per MIGRATION.md §4.
+/// Selects the runtime: io_uring on Linux when supported, plain tokio (epoll) otherwise.
 #[must_use]
 pub fn pick_runtime() -> RuntimeKind {
     if !cfg!(target_os = "linux") {
@@ -373,10 +372,10 @@ pub fn num_cores() -> usize {
 
 // ─── sd_notify (systemd Type=notify support) ──────────────────────────────────
 //
-// Operators deploying via the published systemd units (docs/v2.md §5,
-// MIGRATION.md §12.2) declare `Type=notify` and `WatchdogSec=30`. The binary
-// MUST send `READY=1` once and `WATCHDOG=1` periodically, otherwise systemd
-// hangs at startup and SIGKILLs after WatchdogSec elapses.
+// Operators deploying via the published systemd units declare `Type=notify`
+// and `WatchdogSec=30`. The binary MUST send `READY=1` once and `WATCHDOG=1`
+// periodically, otherwise systemd hangs at startup and SIGKILLs after
+// WatchdogSec elapses.
 //
 // We implement a minimal direct-syscall sd_notify using `nix` on Linux. On
 // non-Linux targets these are no-ops so the same call sites compile everywhere.

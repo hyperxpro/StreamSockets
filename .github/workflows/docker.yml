@@ -1,4 +1,4 @@
-name: Docker Build & Push (Rust 2.0.0)
+name: Docker Build & Push
 
 on:
   push:
@@ -19,11 +19,11 @@ jobs:
       matrix:
         include:
           - name: server
-            dockerfile: docker/Dockerfile-Server-Rust
+            dockerfile: docker/Dockerfile-Server
             image: hyperxpro/streamsockets
             tag_suffix: server
           - name: client
-            dockerfile: docker/Dockerfile-Client-Rust
+            dockerfile: docker/Dockerfile-Client
             image: hyperxpro/streamsockets
             tag_suffix: client
     steps:

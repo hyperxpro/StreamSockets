@@ -1,6 +1,7 @@
 //! streamsockets-server: HTTP/WS handshake → header auth → upstream UDP forwarder.
 //!
-//! See MIGRATION.md §5 (wire protocol), §7.1 (data flow), §6.7 (graceful drain).
+//! Wire protocol, data flow, and graceful-drain semantics are documented at
+//! the call sites in `handshake.rs`, `tunnel.rs`, and `run()` below.
 
 #![deny(clippy::await_holding_lock)]
 // Same pedantic-suppression rationale as `streamsockets-core/src/lib.rs`.
@@ -327,8 +328,8 @@ pub fn init_shared(cfg: Arc<ServerConfig>) -> anyhow::Result<Arc<Server>> {
         );
     }
 
-    // Default per MIGRATION.md §10.1 is `0.0.0.0` (wildcard) for parity with
-    // Java 1.7.0. Operators concerned about exposing the registry can set
+    // Default is `0.0.0.0` (wildcard) for parity with Java 1.7.0. Operators
+    // concerned about exposing the registry can set
     // `METRICS_BIND_ADDRESS=127.0.0.1` or set `METRICS_BIND_ALL=false` (the
     // current default keeps it permissive). When wildcard-bound we log a warn
     // so operators see it in startup logs.

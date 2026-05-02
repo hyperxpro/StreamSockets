@@ -1,5 +1,4 @@
 //! Bounded byte-capped frame queue with drop-oldest semantics.
-//! See MIGRATION.md §6.3.
 
 use std::collections::VecDeque;
 

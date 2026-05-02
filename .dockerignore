@@ -3,10 +3,6 @@ target
 **/target/
 **/*.rs.bk
 
-# Java legacy artifacts (kept for the .jar/.class line — Java tree itself is gone)
-*.jar
-*.class
-
 # IDE / editor
 .idea
 .vscode

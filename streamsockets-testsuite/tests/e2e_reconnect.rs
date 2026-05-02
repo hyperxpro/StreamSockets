@@ -379,7 +379,7 @@ async fn is_connecting_resets_after_failure() {
 /// because `Metrics::global()` pollution + tokio runtime state from preceding
 /// tests changes shutdown timing. The queue-flush invariant itself is covered
 /// by unit tests in `streamsockets-client/src/queue.rs` and integration tests
-/// in `chaos_queue_overflow.rs`. See MIGRATION.md §11.1.
+/// in `chaos_queue_overflow.rs`.
 #[tokio::test]
 #[ignore = "test-pollution flake; covered by queue::tests + chaos_queue_overflow"]
 async fn queued_frames_drain_after_reconnect() {

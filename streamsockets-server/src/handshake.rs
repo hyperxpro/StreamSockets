@@ -1,7 +1,7 @@
 //! HTTP/1.1 upgrade handshake: header validation, token auth, IP/CIDR check, lease.
 //!
-//! Mirrors `server/AuthenticationHandler.java` and `WebSocketServerInitializer.java`.
-//! v2 protocol per MIGRATION.md §5.
+//! Mirrors `server/AuthenticationHandler.java` and `WebSocketServerInitializer.java`,
+//! adapted to the v2 wire protocol.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -336,7 +336,7 @@ async fn handle_request(
         }
         _ => {
             // v1-style legacy-route request without v2 X-Route-* headers — reject as
-            // bad_request (per docs/v2.md §1.1, v1 wire protocol is removed).
+            // bad_request; the v1 wire protocol is removed in v2.
             server
                 .metrics
                 .handshake_failures
@@ -522,8 +522,8 @@ async fn handle_request(
 
     // Capture whether the client included an explicit X-StreamSockets-Version
     // header before we hand `req` to the upgrade routine (which needs a mut
-    // borrow). Per MIGRATION.md §5.1 the server only echoes the version
-    // header when the request carried one.
+    // borrow). The server only echoes the version header when the request
+    // carried one.
     let echo_version = headers.get("X-StreamSockets-Version").is_some();
 
     server

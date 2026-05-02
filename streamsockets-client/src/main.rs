@@ -1,9 +1,9 @@
 //! `StreamSockets` client entry point.
 //!
-//! Per MIGRATION.md §4 / §7.2: N current-thread runtimes, one per core, each
-//! pinned and each binding the UDP listener with `SO_REUSEPORT` before any
-//! `recv_from()` runs. Worker-0 also installs the SIGTERM/SIGINT handler;
-//! the shared `CancellationToken` broadcasts shutdown to every worker.
+//! N current-thread runtimes, one per core, each pinned and each binding the
+//! UDP listener with `SO_REUSEPORT` before any `recv_from()` runs. Worker-0
+//! also installs the SIGTERM/SIGINT handler; the shared `CancellationToken`
+//! broadcasts shutdown to every worker.
 
 #![allow(clippy::doc_markdown)]
 //!
