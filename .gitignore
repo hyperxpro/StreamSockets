@@ -1,7 +1,4 @@
 target/
-!.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
 
 ### IntelliJ IDEA ###
 .idea/*
@@ -25,14 +22,17 @@ target/
 /nbdist/
 /.nb-gradle/
 build/
-!**/src/main/**/build/
-!**/src/test/**/build/
 
 ### VS Code ###
 .vscode/
 
 ### Mac OS ###
 .DS_Store
-dependency-reduced-pom.xml
 
-*.jar
+### Rust ###
+# Cargo build directory at any depth (rust/target/, rust/*/target/, etc.)
+**/target/
+# Locked Cargo.lock is committed at the workspace root only.
+
+### Local Claude Code workspace (machine-local hooks / cached state) ###
+.claude/

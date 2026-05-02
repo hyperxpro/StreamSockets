@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned; bump in lockstep with workspace.package.rust-version when MSRV advances.
+# 1.84 was the original spec target but the crates.io ecosystem (icu_*, getrandom 0.4,
+# hashbrown 0.17) has since required rustc >= 1.86. CI matrix tests both this pin and `stable`.
+channel = "1.86"
+components = ["rustfmt", "clippy"]

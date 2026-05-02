@@ -1,0 +1,20 @@
+# Keep the build context lean — never ship build artifacts into the Docker daemon.
+target
+**/target/
+**/*.rs.bk
+
+# IDE / editor
+.idea
+.vscode
+*.iml
+
+# VCS
+.git
+.gitignore
+.github
+
+# Misc
+docker
+docs
+*.md
+LICENSE

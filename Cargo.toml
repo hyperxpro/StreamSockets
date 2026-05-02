@@ -1,0 +1,152 @@
+[workspace]
+resolver = "2"
+members = [
+    "streamsockets-core",
+    "streamsockets-auth",
+    "streamsockets-metrics",
+    "streamsockets-server",
+    "streamsockets-client",
+    "streamsockets-testsuite",
+]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.86"
+license = "Apache-2.0"
+authors = ["Aayush Atharva"]
+repository = "https://github.com/hyperxpro/StreamSockets"
+
+[workspace.dependencies]
+tokio = { version = "1.43", default-features = false }
+hyper = { version = "1.5", default-features = false }
+hyper-util = { version = "0.1", default-features = false }
+http-body-util = "0.1"
+http = "1.1"
+fastwebsockets = { version = "0.10", features = ["upgrade", "with_axum"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2.2"
+rustls-platform-verifier = "0.5"
+prometheus = { version = "0.13", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_yml = "0.0.12"
+ipnet = "2.10"
+bytes = "1.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+socket2 = { version = "0.5", features = ["all"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+flume = "0.11"
+arc-swap = "1.7"
+mimalloc = { version = "0.1", default-features = false }
+notify = "7.0"
+thiserror = "2.0"
+anyhow = "1.0"
+rand = "0.8"
+core_affinity = "0.8"
+dashmap = "5.5"
+secrecy = { version = "0.8", default-features = false }
+nix = { version = "0.29", default-features = false, features = ["fs", "socket", "net", "uio"] }
+# tokio-uring + io-uring are Linux-only; member crates gate consumption with
+# `[target.'cfg(target_os = "linux")'.dependencies]`. Currently scaffolded for the
+# Linux io_uring implementation deferred to v2.0.x — see VERDICT.md "Deferred work".
+tokio-uring = { version = "0.5", features = ["bytes"] }
+io-uring = "0.7"
+proxy-protocol = "0.5"
+criterion = "0.5"
+sha1 = "0.10"
+base64 = "0.22"
+url = "2.5"
+futures-util = "0.3"
+pin-project-lite = "0.2"
+once_cell = "1.20"
+parking_lot = "0.12"
+async-trait = "0.1"
+uuid = { version = "1.10", features = ["v4"] }
+tempfile = "3.13"
+assert_cmd = "2.0"
+smallvec = { version = "1.13", features = ["const_generics", "union"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+
+# Workspace-wide clippy/lint configuration. Per the rust.yml workflow we run
+# `cargo clippy --workspace -- -D warnings -W clippy::pedantic`. The pedantic
+# group is opt-in for a reason — it surfaces a long tail of stylistic lints.
+# Allow-list below is curated: items we have judged net-noise (doc-markdown
+# false positives on identifiers like `SO_REUSEPORT`, missing-error/panic doc
+# enforcement deferred to review, intentional cast forms, idiomatic match
+# patterns we don't want rewritten). Add-only — never delete an `allow`
+# without auditing every site it currently silences.
+[workspace.lints.clippy]
+# Enable the pedantic group with lower priority than the per-lint allows
+# below — Cargo emits `-W clippy::pedantic` first (priority = -1), then the
+# individual `-A clippy::lint_name` flags after, so the allows win.
+# This means `cargo clippy -- -D warnings` alone is enough to enforce
+# pedantic-with-allows; CI no longer needs `-W clippy::pedantic` on the CLI.
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+cast_lossless = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+redundant_closure_for_method_calls = "allow"
+manual_let_else = "allow"
+items_after_statements = "allow"
+if_not_else = "allow"
+needless_continue = "allow"
+match_wild_err_arm = "allow"
+map_unwrap_or = "allow"
+should_implement_trait = "allow"
+duplicated_attributes = "allow"
+unnecessary_wraps = "allow"
+unreadable_literal = "allow"
+too_many_lines = "allow"
+similar_names = "allow"
+unnested_or_patterns = "allow"
+single_match_else = "allow"
+semicolon_if_nothing_returned = "allow"
+needless_pass_by_value = "allow"
+match_same_arms = "allow"
+ignored_unit_patterns = "allow"
+single_match = "allow"
+bool_to_int_with_if = "allow"
+needless_bool = "allow"
+ptr_as_ptr = "allow"
+ref_as_ptr = "allow"
+borrow_as_ptr = "allow"
+redundant_else = "allow"
+unnecessary_literal_bound = "allow"
+struct_excessive_bools = "allow"
+struct_field_names = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+large_stack_arrays = "allow"
+option_if_let_else = "allow"
+missing_const_for_fn = "allow"
+used_underscore_binding = "allow"
+unused_self = "allow"
+doc_lazy_continuation = "allow"
+doc_overindented_list_items = "allow"
+trivially_copy_pass_by_ref = "allow"
+wildcard_imports = "allow"
+format_push_string = "allow"
+uninlined_format_args = "allow"
+unused_async = "allow"
+needless_raw_string_hashes = "allow"

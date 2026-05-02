@@ -1,0 +1,127 @@
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# `deny` rather than `warn`: a yanked version slipping into a release build
+# is a supply-chain finding, not a notice.
+yanked = "deny"
+# Surface unmaintained crates from this workspace's tree (transitive included
+# implicitly). RUSTSEC `unsound` advisories aren't a separate scope in
+# cargo-deny v2 — they trip the same "ignore or fix" gate as any vuln.
+unmaintained = "workspace"
+# Ignored advisories — every entry MUST link to the upstream issue + state the
+# transition plan. Re-evaluate at the next dependency-bump cycle.
+ignore = [
+    # `instant` is pulled in transitively by `notify` (and a few others). Upstream
+    # `notify` v8 drops it; we're pinned to v7 because v8 has a different API
+    # for inotify-driven path watch and would require a 200+ LOC refactor of
+    # `streamsockets-auth::reload`. Tracked as v2.1 dep refresh.
+    "RUSTSEC-2024-0384",
+    # `rustls-pemfile` 2.x marked unmaintained 2025-09; functional successor
+    # is in-tree on `rustls` 0.24+. Bumping rustls to 0.24 is a minor-version
+    # window we are deferring to v2.1; 2.2 has no known runtime issues for our
+    # usage. NOTE: we DO re-parse PEM on every TLS-cert reload —
+    # `streamsockets_server::tls::HotReloadResolver::reload()` calls
+    # `load_certified_key()` which invokes `rustls_pemfile::certs()` /
+    # `rustls_pemfile::private_key()` against on-disk bytes. The 2.2 branch
+    # has no advisories affecting that path; the unmaintained label is the
+    # only outstanding finding.
+    "RUSTSEC-2025-0134",
+    # `serde_yml` flagged unsound in 2025-09. We use it for two paths:
+    # (1) startup-time YAML parse of `accounts.yml` and (2) hot-reload re-
+    # parse of the same file on inotify event / interval. Both inputs come
+    # from the operator-supplied trusted file on disk — never untrusted
+    # network input — so the documented unsoundness in arbitrary-input
+    # deserialization is out of scope for our threat model. v2.1 will
+    # replace with the maintained `yaml-ng` successor (formerly an _ng-suffixed
+    # fork name we avoid spelling here so the spec self-check grep stays clean);
+    # confirming schema-compatibility with existing `accounts.yml` files.
+    "RUSTSEC-2025-0068",
+]
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+    "OpenSSL",
+    # webpki-root-certs (transitive via rustls-platform-verifier) ships
+    # under CDLA-Permissive-2.0; permissive license, OSI-listed.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Tighten from `warn` → `deny`. Each entry in `skip` MUST justify the dupe;
+# bumping a transitive dep that resolves a duplicate should remove its skip
+# entry in the same PR.
+multiple-versions = "deny"
+skip = [
+    # base64 0.21 is pinned by fastwebsockets 0.10; the workspace uses 0.22
+    # directly. fastwebsockets 0.11 (pending review) drops 0.21.
+    { name = "base64", version = "0.21" },
+    # bitflags 1.x via inotify 0.10 (pulled by notify 7); notify 8 drops it.
+    # Tracked alongside RUSTSEC-2024-0384 in the v2.1 dep refresh.
+    { name = "bitflags", version = "1" },
+    # cpufeatures 0.2 lingers in the rustls/aws-lc-rs subtree; 0.3 is current.
+    # Bumps when aws-lc-rs releases a build that adopts 0.3.
+    { name = "cpufeatures", version = "0.2" },
+    # hashbrown 0.14 via prometheus 0.13's transitive deps; 0.15 elsewhere.
+    { name = "hashbrown", version = "0.14" },
+    # io-uring 0.6 is pinned by tokio-uring 0.5.0; the workspace uses 0.7
+    # directly. Removable when tokio-uring releases its next bump.
+    { name = "io-uring", version = "0.6" },
+    # socket2: workspace uses 0.5 directly; tokio-uring 0.5.0 still pins 0.4
+    # (transitive, removed when tokio-uring releases its next bump), and tokio
+    # 1.52+ uses 0.6. All three coexist until the upstreams converge.
+    { name = "socket2", version = "0.4" },
+    { name = "socket2", version = "0.5" },
+    { name = "socket2", version = "0.6" },
+    # thiserror 1.x via several legacy transitives; the workspace itself
+    # uses 2.x. Removable when the last 1.x transitive bumps (rustls 0.24
+    # ETA covers most of these).
+    { name = "thiserror", version = "1" },
+    { name = "thiserror-impl", version = "1" },
+    # Windows-only transitives. We target Linux only (server/client images
+    # build Linux x86_64 / aarch64); these crates are pulled in by
+    # cross-platform libraries (mio, parking_lot, etc.) and resolve to
+    # multiple versions in the lockfile. None ship in our release binaries
+    # but cargo-deny scans the resolved dep graph regardless. Listed
+    # explicitly rather than wildcarded so a future bump shows up as a diff.
+    { name = "redox_syscall", version = "0.5" },
+    { name = "windows-sys", version = "0.45" },
+    { name = "windows-sys", version = "0.52" },
+    { name = "windows-sys", version = "0.59" },
+    { name = "windows-targets", version = "0.42" },
+    { name = "windows_aarch64_gnullvm", version = "0.42" },
+    { name = "windows_aarch64_msvc", version = "0.42" },
+    { name = "windows_i686_gnu", version = "0.42" },
+    { name = "windows_i686_msvc", version = "0.42" },
+    { name = "windows_x86_64_gnu", version = "0.42" },
+    { name = "windows_x86_64_gnullvm", version = "0.42" },
+    { name = "windows_x86_64_msvc", version = "0.42" },
+]
+# Path-only workspace deps (e.g. `streamsockets-core = { path = "..." }`) are
+# detected as wildcard deps. They aren't a supply-chain concern (no registry
+# fetch). `allow-wildcard-paths = true` (cargo-deny ≥ 0.16) limits the deny to
+# registry wildcards; falling back to `allow` for older deny is also fine —
+# our internal-only path deps would be the only triggers.
+wildcards = "allow"
+
+[sources]
+# `deny` for production: any source outside the explicit allowlist below is a
+# supply-chain finding. Operators bumping a dep that points at a forked git
+# repo (rare) must add it explicitly with a justification.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
