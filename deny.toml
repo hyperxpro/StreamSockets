@@ -77,8 +77,15 @@ skip = [
     { name = "cpufeatures", version = "0.2" },
     # hashbrown 0.14 via prometheus 0.13's transitive deps; 0.15 elsewhere.
     { name = "hashbrown", version = "0.14" },
-    # socket2 0.5 vs 0.6: hickory-resolver pins 0.5; tokio 1.43 uses 0.6.
+    # io-uring 0.6 is pinned by tokio-uring 0.5.0; the workspace uses 0.7
+    # directly. Removable when tokio-uring releases its next bump.
+    { name = "io-uring", version = "0.6" },
+    # socket2: workspace uses 0.5 directly; tokio-uring 0.5.0 still pins 0.4
+    # (transitive, removed when tokio-uring releases its next bump), and tokio
+    # 1.52+ uses 0.6. All three coexist until the upstreams converge.
+    { name = "socket2", version = "0.4" },
     { name = "socket2", version = "0.5" },
+    { name = "socket2", version = "0.6" },
     # thiserror 1.x via several legacy transitives; the workspace itself
     # uses 2.x. Removable when the last 1.x transitive bumps (rustls 0.24
     # ETA covers most of these).
