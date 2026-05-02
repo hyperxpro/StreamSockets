@@ -324,8 +324,23 @@ pub fn classify_io_error(e: &io::Error) -> ErrorClass {
 mod tests {
     use super::*;
 
+    /// `cross test` runs aarch64 binaries under qemu-user, which mistranslates
+    /// `recvmsg(MSG_TRUNC)` and SIGSEGVs the syscall translator. Tests that
+    /// drive that surface bail out via `CROSS_RUNNER`; the same paths run
+    /// natively on x86_64 in `build-test-linux`.
+    fn skip_under_qemu_user(test_name: &str) -> bool {
+        if std::env::var("CROSS_RUNNER").as_deref() == Ok("qemu-user") {
+            eprintln!("skipping {test_name}: CROSS_RUNNER=qemu-user");
+            return true;
+        }
+        false
+    }
+
     #[tokio::test]
     async fn tokio_udp_round_trip() {
+        if skip_under_qemu_user("tokio_udp_round_trip") {
+            return;
+        }
         let a = tokio::net::UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("test");
@@ -369,10 +384,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn tokio_udp_non_gro_truncation_surfaces() {
-        // qemu-aarch64-user (cross test runner) SIGSEGVs inside the
-        // recvmsg(MSG_TRUNC) translator; covered natively by build-test-linux.
-        if std::env::var("CROSS_RUNNER").as_deref() == Ok("qemu-user") {
-            eprintln!("skipping tokio_udp_non_gro_truncation_surfaces: CROSS_RUNNER=qemu-user");
+        if skip_under_qemu_user("tokio_udp_non_gro_truncation_surfaces") {
             return;
         }
         let a = tokio::net::UdpSocket::bind("127.0.0.1:0")
