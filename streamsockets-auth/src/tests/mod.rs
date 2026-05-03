@@ -299,11 +299,9 @@ accounts:
     assert!(!snap2.by_token_hash.contains_key(&h_old));
 
     let same_reload_count = Arc::new(AtomicUsize::new(0));
-    let same_dispatch = tracing::Dispatch::new(
-        Registry::default().with(InfoEventCounter {
-            count: Arc::clone(&same_reload_count),
-        }),
-    );
+    let same_dispatch = tracing::Dispatch::new(Registry::default().with(InfoEventCounter {
+        count: Arc::clone(&same_reload_count),
+    }));
     let _guard = tracing::dispatcher::set_default(&same_dispatch);
     auth.reload().await;
     drop(_guard);

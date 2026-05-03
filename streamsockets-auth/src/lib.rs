@@ -595,10 +595,7 @@ impl TokenAuthentication {
                 return;
             }
         };
-        let mut config_hash = self
-            .config_hash
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut config_hash = self.config_hash.lock().unwrap_or_else(|e| e.into_inner());
         if config_hash.as_ref() == Some(&loaded.digest) {
             return;
         }
