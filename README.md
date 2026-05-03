@@ -14,7 +14,7 @@ StreamSockets tunnels UDP over WebSockets so UDP traffic can traverse WebSocket-
 ```yaml
 services:
   streamsockets-server:
-    image: hyperxpro/streamsockets:server-2.0.0
+    image: hyperxpro/streamsockets:server-2.1.0
     restart: unless-stopped
     environment:
       - ACCOUNTS_CONFIG_FILE=/etc/streamsockets/accounts.yml
@@ -28,7 +28,7 @@ services:
       - "9090:9090/tcp"
 
   streamsockets-client:
-    image: hyperxpro/streamsockets:client-2.0.0
+    image: hyperxpro/streamsockets:client-2.1.0
     restart: unless-stopped
     environment:
       - WEBSOCKET_URI=ws://streamsockets-server:8080/tunnel

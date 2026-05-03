@@ -201,7 +201,7 @@ impl Metrics {
                 "streamsockets_connection_duration_seconds",
                 "Connection duration in seconds by account",
             )
-            // Spec §9.1 buckets (1s..3600s) extended in v2.0.0 with longer
+            // Spec §9.1 buckets (1s..3600s) extended in v2.1.0 with longer
             // tails (2h, 6h, 24h) so the +Inf bucket isn't the only signal
             // for the long-lived tunnel population. These are additive and
             // do not move existing quantiles.
