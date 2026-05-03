@@ -480,7 +480,7 @@ pub fn init_shared(cfg: &ClientConfig) {
         ws = %cfg.websocket_uri,
         route = %cfg.route,
         exit_on_failure = cfg.exit_on_failure,
-        "starting streamsockets-client v2.0.0"
+        "starting streamsockets-client v2.1.0"
     );
 
     // Warn-and-ignore the v1 env var that v2 no longer honors.

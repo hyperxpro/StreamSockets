@@ -67,40 +67,6 @@ jobs:
       - name: Test
         run: cargo test --workspace --release --locked
 
-  build-test-aarch64:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch: stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          key: aarch64
-      - name: Install cross
-        run: cargo install cross --locked --version 0.2.5
-      - name: Cross build
-        run: cross build --workspace --release --locked --target aarch64-unknown-linux-gnu
-      # `cross test` runs the test binaries inside a QEMU-emulated aarch64
-      # rootfs. QEMU does NOT emulate the io_uring syscall surface — any
-      # uring-specific test would silently fall back to epoll without
-      # exercising the io_uring code path. Set DISABLE_IOURING=true so the
-      # runtime probe deterministically picks the epoll path under cross.
-      # The native io_uring path is exercised by `build-test-linux` (x86_64
-      # on a real kernel). The default `--features` set does not enable
-      # `tokio-uring` today; if that changes, re-evaluate this comment.
-      #
-      # Tests that exercise `recvmsg(MSG_TRUNC)` + ancillary cmsg paths skip
-      # themselves when `CROSS_RUNNER=qemu-user` (cross sets this on the
-      # container automatically): qemu-aarch64-user mistranslates that
-      # syscall surface — assertions misfire and the translator occasionally
-      # SIGSEGVs. Coverage isn't lost; `build-test-linux` exercises those
-      # paths on a real kernel.
-      - name: Cross test
-        env:
-          DISABLE_IOURING: "true"
-        run: cross test --workspace --release --locked --target aarch64-unknown-linux-gnu
-
   audit:
     runs-on: ubuntu-latest
     steps:

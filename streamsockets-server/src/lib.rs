@@ -297,7 +297,7 @@ pub fn init_shared(cfg: Arc<ServerConfig>) -> anyhow::Result<Arc<Server>> {
     info!(
         bind = %format!("{}:{}", cfg.bind_address, cfg.bind_port),
         ws_path = %cfg.ws_path,
-        "starting streamsockets-server v2.0.0"
+        "starting streamsockets-server v2.1.0"
     );
 
     // CRITICAL: refuse to start when CLIENT_IP_HEADER is set without a trusted
