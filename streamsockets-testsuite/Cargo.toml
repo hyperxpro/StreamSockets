@@ -20,10 +20,20 @@ bytes = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-hyper = { workspace = true, features = ["client", "http1"] }
+hyper = { workspace = true, features = ["client", "http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio", "client"] }
 http-body-util = { workspace = true }
 http = { workspace = true }
+# Used by FIX.md-driven integration tests that spin up custom fake-WS
+# servers (close_1002_reconnect, close_local_decode_transient, …) to drive
+# the client through specific close codes / decode errors.
+fastwebsockets = { workspace = true }
+# Used by server_emits_close_on_proto_err.rs to compute Sec-WebSocket-Accept
+# during a hand-rolled v2 handshake (so we can write a malformed frame after
+# upgrade without going through fastwebsockets, which only writes well-formed
+# frames).
+sha1 = { workspace = true }
+base64 = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
 parking_lot = { workspace = true }

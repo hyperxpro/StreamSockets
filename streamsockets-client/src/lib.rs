@@ -137,6 +137,11 @@ pub struct ClientConfig {
     pub udp_timeout_secs: u64,
     pub exit_on_failure: bool,
     pub queue_max_bytes: u64,
+    /// Maximum number of frames buffered for replay on reconnect. FIFO with
+    /// drop-oldest. Operates alongside `queue_max_bytes`; whichever cap is
+    /// hit first triggers eviction. Set to 0 to disable the queue (every
+    /// frame written while disconnected is dropped immediately).
+    pub queue_max_packets: usize,
     pub queue_drain_timeout_ms: u64,
     pub threads: u32,
     pub max_frame_size: usize,
@@ -174,6 +179,7 @@ impl std::fmt::Debug for ClientConfig {
             .field("udp_timeout_secs", &self.udp_timeout_secs)
             .field("exit_on_failure", &self.exit_on_failure)
             .field("queue_max_bytes", &self.queue_max_bytes)
+            .field("queue_max_packets", &self.queue_max_packets)
             .field("queue_drain_timeout_ms", &self.queue_drain_timeout_ms)
             .field("threads", &self.threads)
             .field("max_frame_size", &self.max_frame_size)
@@ -217,6 +223,7 @@ impl ClientConfig {
             udp_timeout_secs: env_value_as_u64("UDP_TIMEOUT", 300),
             exit_on_failure: env_bool("EXIT_ON_FAILURE", false),
             queue_max_bytes: env_value_as_u64("QUEUE_MAX_BYTES", 1_048_576),
+            queue_max_packets: env_value_as_int("QUEUE_MAX_PACKETS", 32) as usize,
             queue_drain_timeout_ms: env_value_as_u64("QUEUE_DRAIN_TIMEOUT_MS", 30_000),
             threads: env_value_as_int("THREADS", default_threads as i64) as u32,
             max_frame_size: env_value_as_int("MAX_FRAME_SIZE", 65536) as usize,
@@ -480,7 +487,7 @@ pub fn init_shared(cfg: &ClientConfig) {
         ws = %cfg.websocket_uri,
         route = %cfg.route,
         exit_on_failure = cfg.exit_on_failure,
-        "starting streamsockets-client v2.1.0"
+        "starting streamsockets-client v2.2.0"
     );
 
     // Warn-and-ignore the v1 env var that v2 no longer honors.
@@ -502,6 +509,31 @@ pub fn init_shared(cfg: &ClientConfig) {
             "the upstream server uses CLIENT_IP_HEADER trust without CIDR allowlist. \
              Ensure your network restricts direct access to the WS endpoint or that all \
              traffic transits a trusted L4/L7 proxy that strips/sets the header."
+        );
+    }
+
+    // (§3.3) MAX_FRAME_SIZE mismatch warning: if the client's cap is below the
+    // v2 default 65536 and the server's cap is larger, server-emitted frames
+    // in the gap trip `WebSocketError::FrameTooLarge` on the client and
+    // surface as a spurious close code 1002. Match client and server.
+    if cfg.max_frame_size < 65536 {
+        warn!(
+            max_frame_size = cfg.max_frame_size,
+            "MAX_FRAME_SIZE is below the v2 default (65536). If the SERVER's \
+             MAX_FRAME_SIZE is larger, server-emitted frames in the gap will \
+             trip WebSocketError::FrameTooLarge on the client and surface as a \
+             spurious close code 1002. Match client and server."
+        );
+    }
+
+    // (§10.2.4) Unbounded packet queues defeat the point of the cap. Warn
+    // loudly so an operator who set QUEUE_MAX_PACKETS=1_000_000 notices.
+    if cfg.queue_max_packets > 10_000 {
+        warn!(
+            queue_max_packets = cfg.queue_max_packets,
+            "QUEUE_MAX_PACKETS is unusually large (>10_000). The replay set is \
+             unlikely to be useful at this depth — stale UDP is typically \
+             discarded by the application. Consider lowering."
         );
     }
 

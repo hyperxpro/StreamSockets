@@ -36,6 +36,7 @@ fn registry_renders_every_spec_metric() {
     m.downstream_queue_drops.inc();
     m.upstream_truncated.inc();
     m.queue_depth_bytes.with_label_values(&["alice"]).set(0.0);
+    m.queue_depth_packets.with_label_values(&["alice"]).set(0.0);
     m.queue_dropped
         .with_label_values(&["alice", "overflow"])
         .inc();
@@ -59,11 +60,12 @@ fn registry_renders_every_spec_metric() {
     // Verify exact count is in lockstep with spec — guards against silent
     // additions to ALL_METRIC_NAMES.
     // 6 preserved from v1.7.0 + 24 new in v2 (incl. upstream_truncated_total and
-    // downstream_queue_drops_total) + 1 (udp_idle_closes_total) = 31.
+    // downstream_queue_drops_total) + 1 (udp_idle_closes_total) +
+    // 1 (queue_depth_packets, added with QUEUE_MAX_PACKETS) = 32.
     assert_eq!(
         ALL_METRIC_NAMES.len(),
-        31,
-        "ALL_METRIC_NAMES count drifted from spec (6 preserved + 24 new + udp_idle_closes_total)"
+        32,
+        "ALL_METRIC_NAMES count drifted from spec (6 preserved + 24 new + udp_idle_closes_total + queue_depth_packets)"
     );
 }
 

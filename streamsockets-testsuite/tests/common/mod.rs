@@ -348,6 +348,7 @@ pub fn default_client_cfg(
         udp_timeout_secs: 60,
         exit_on_failure: false,
         queue_max_bytes: 1024 * 1024,
+        queue_max_packets: 32,
         queue_drain_timeout_ms: 5000,
         threads: 1,
         max_frame_size: 65536,

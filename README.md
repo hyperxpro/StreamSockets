@@ -14,7 +14,7 @@ StreamSockets tunnels UDP over WebSockets so UDP traffic can traverse WebSocket-
 ```yaml
 services:
   streamsockets-server:
-    image: hyperxpro/streamsockets:server-2.1.0
+    image: hyperxpro/streamsockets:server-2.2.0
     restart: unless-stopped
     environment:
       - ACCOUNTS_CONFIG_FILE=/etc/streamsockets/accounts.yml
@@ -28,7 +28,7 @@ services:
       - "9090:9090/tcp"
 
   streamsockets-client:
-    image: hyperxpro/streamsockets:client-2.1.0
+    image: hyperxpro/streamsockets:client-2.2.0
     restart: unless-stopped
     environment:
       - WEBSOCKET_URI=ws://streamsockets-server:8080/tunnel
@@ -62,19 +62,6 @@ To enable io_uring:
 - Set `DISABLE_IOURING=false` or remove it from the environment.
 
 If io_uring is blocked or unavailable, the runtime falls back to tokio/epoll.
-
-## Security: CLIENT_IP_HEADER spoofing
-
-If you set `CLIENT_IP_HEADER` (e.g., to honor `X-Forwarded-For` from an upstream
-proxy), also set `CLIENT_IP_HEADER_TRUSTED_CIDRS` to the comma-separated CIDRs
-of those proxies. Otherwise any direct connection to the server can spoof the
-header and impersonate any IP in `allowedIps`. The server logs a startup warning
-in that configuration; treat it as misconfiguration in production. Example:
-
-```yaml
-- CLIENT_IP_HEADER=X-Forwarded-For
-- CLIENT_IP_HEADER_TRUSTED_CIDRS=10.0.0.0/8,fd00::/8
-```
 
 ## License
 

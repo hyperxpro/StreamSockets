@@ -91,6 +91,7 @@ pub struct Metrics {
     pub downstream_queue_drops: Counter,
     pub upstream_truncated: Counter,
     pub queue_depth_bytes: GaugeVec,
+    pub queue_depth_packets: GaugeVec,
     pub queue_dropped: CounterVec,
     pub queue_purged: CounterVec,
     pub client_foreign_sources: Counter,
@@ -133,6 +134,7 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
     "streamsockets_downstream_queue_drops_total",
     "streamsockets_upstream_truncated_total",
     "streamsockets_queue_depth_bytes",
+    "streamsockets_queue_depth_packets",
     "streamsockets_queue_dropped_total",
     "streamsockets_queue_purged_total",
     "streamsockets_client_foreign_sources_total",
@@ -355,6 +357,15 @@ impl Metrics {
             registry
         )
         .expect("static metric registration is infallible");
+        let queue_depth_packets = register_gauge_vec_with_registry!(
+            Opts::new(
+                "streamsockets_queue_depth_packets",
+                "Reconnect queue depth in packets (frames)",
+            ),
+            &["account_name"],
+            registry
+        )
+        .expect("static metric registration is infallible");
         let queue_dropped = register_counter_vec_with_registry!(
             Opts::new(
                 "streamsockets_queue_dropped_total",
@@ -444,6 +455,7 @@ impl Metrics {
             downstream_queue_drops,
             upstream_truncated,
             queue_depth_bytes,
+            queue_depth_packets,
             queue_dropped,
             queue_purged,
             client_foreign_sources,

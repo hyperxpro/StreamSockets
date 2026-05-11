@@ -25,6 +25,7 @@ fn cfg_ws_with_token() -> ClientConfig {
         udp_timeout_secs: 300,
         exit_on_failure: false,
         queue_max_bytes: 1_048_576,
+        queue_max_packets: 32,
         queue_drain_timeout_ms: 30_000,
         threads: 1,
         max_frame_size: 65535,
