@@ -292,8 +292,20 @@ pub async fn run_tunnel(
                         }
                         OpCode::Continuation => {
                             // FragmentCollector should reassemble; if we see a raw continuation
-                            // here that's a protocol error.
+                            // here that's a protocol error. (§3.1.4) log as local-decode source
+                            // so server-side operators can distinguish it from a wire-level
+                            // anomaly.
+                            warn!(
+                                account = %account,
+                                source = "local-decode",
+                                variant = "raw_continuation",
+                                "received raw Continuation opcode after FragmentCollector; \
+                                 closing tunnel with 1002"
+                            );
                             server.metrics.protocol_violations.with_label_values(&["continuation"]).inc();
+                            let _ = ws
+                                .write_frame(Frame::close(1002, b"protocol error"))
+                                .await;
                             close_reason = Some(1002);
                             break;
                         }
@@ -310,7 +322,27 @@ pub async fn run_tunnel(
                         // rather than substring-matching `to_string()` (the prior
                         // implementation broke whenever fastwebsockets touched its
                         // Display impls).
-                        debug!("ws read err: {e}");
+                        //
+                        // §3.1.4 diagnostic upgrade: log the exact
+                        // `WebSocketError` variant (low-cardinality string)
+                        // so the server-side log lines tell operators
+                        // whether the protocol violation was a peer
+                        // FrameTooLarge, an InvalidCloseCode, an RSV bit
+                        // anomaly, etc. — without needing to enable
+                        // `RUST_LOG=fastwebsockets=trace`.
+                        //
+                        // §3.1.4 also adds an explicit `write_frame(Close(...))`
+                        // on this branch. Previously the server silently
+                        // dropped TCP after setting `close_reason = Some(1002)`;
+                        // the client saw EOF and classified the disconnect
+                        // as Transient, which made server-side root-cause
+                        // chasing harder (no peer signal, just a TCP cut).
+                        // An explicit Close frame makes the protocol-error
+                        // path symmetric with the other server-initiated
+                        // closes (1001, 1003, 1011, 1012) and gives the
+                        // client a structured event to log.
+                        let variant = ws_error_variant(&e);
+                        debug!(variant, error = %e, "ws read err");
                         let is_protocol = matches!(
                             e,
                             WebSocketError::ReservedBitsNotZero
@@ -329,10 +361,16 @@ pub async fn run_tunnel(
                             server
                                 .metrics
                                 .protocol_violations
-                                .with_label_values(&["frame_format"])
+                                .with_label_values(&[variant])
                                 .inc();
+                            let _ = ws
+                                .write_frame(Frame::close(1002, b"protocol error"))
+                                .await;
                             close_reason = Some(1002);
                         } else {
+                            let _ = ws
+                                .write_frame(Frame::close(1011, b"internal error"))
+                                .await;
                             close_reason = Some(1011);
                         }
                         break;
@@ -380,6 +418,28 @@ pub async fn run_tunnel(
         debug!(account = %account, "tunnel closed normally");
     }
     Ok(())
+}
+
+/// Human-readable label for a `WebSocketError` variant. Low-cardinality
+/// (≤ ~12 values across the closed set) — safe to use as a Prometheus
+/// label value on `protocol_violations_total{reason}`. Mirrors the
+/// client-side helper in `streamsockets_client::fsm::ws_error_variant`
+/// so operators see matching variant strings on both sides of a tunnel.
+fn ws_error_variant(e: &WebSocketError) -> &'static str {
+    match e {
+        WebSocketError::ReservedBitsNotZero => "reserved_bits_not_zero",
+        WebSocketError::InvalidFragment => "invalid_fragment",
+        WebSocketError::InvalidContinuationFrame => "invalid_continuation",
+        WebSocketError::ControlFrameFragmented => "control_frame_fragmented",
+        WebSocketError::PingFrameTooLarge => "ping_frame_too_large",
+        WebSocketError::FrameTooLarge => "frame_too_large",
+        WebSocketError::InvalidValue => "invalid_value",
+        WebSocketError::InvalidCloseFrame => "invalid_close_frame",
+        WebSocketError::InvalidCloseCode => "invalid_close_code",
+        WebSocketError::InvalidUTF8 => "invalid_utf8",
+        WebSocketError::InvalidStatusCode(_) => "invalid_status_code",
+        _ => "other",
+    }
 }
 
 /// RFC 6455 §7.4: codes 0-999, 1004, 1005, 1006, 1015 are reserved/forbidden

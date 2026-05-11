@@ -1,4 +1,13 @@
-//! Reconnect FSM: Idle → Connecting → Authenticating → Live ⇄ Reconnecting → Terminated.
+//! Reconnect FSM: Idle → Connecting → Authenticating → Live ⇄ Reconnecting.
+//!
+//! Policy (§10.1 always-reconnect contract):
+//!   - `EXIT_ON_FAILURE=true`  → log cause, stamp process exit 1, return.
+//!   - `EXIT_ON_FAILURE=false` → log cause, reconnect after backoff (bounded
+//!     only by `RETRY_BUDGET`). There is no per-close-code terminal branch:
+//!     1002/1003/1008/1011/local decode errors/TCP RST all flow through the
+//!     same reconnect loop. The diagnostic upgrade in §3.1 preserves the
+//!     ability to localize the cause (Path A wire-close vs Path B locally
+//!     synthesized) via log fields and per-variant metric labels.
 //!
 //! Single-source lock-on (§6.4): on the first UDP packet, lock `(src_ip, src_port)`
 //! for the lifetime of the process. Subsequent packets from a foreign source are
@@ -46,6 +55,12 @@ pub type SharedLockedSource = Arc<ArcSwapOption<SocketAddr>>;
 pub type SharedExitCode = Arc<AtomicI32>;
 
 /// Visible client states (label values for `streamsockets_client_state`).
+///
+/// Under §10.1 always-reconnect policy the `Terminated` state no longer
+/// exists: every disconnect routes either to clean process exit
+/// (`EXIT_ON_FAILURE=true`) or back into Reconnecting. The historical
+/// `"terminal"` label value is intentionally absent from the label
+/// allowlist in `set_state`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Idle,
@@ -53,7 +68,6 @@ pub enum State {
     Authenticating,
     Live,
     Reconnecting,
-    Terminated,
 }
 
 impl State {
@@ -64,7 +78,6 @@ impl State {
             State::Authenticating => "authenticating",
             State::Live => "live",
             State::Reconnecting => "reconnecting",
-            State::Terminated => "terminal",
         }
     }
 }
@@ -103,7 +116,10 @@ pub async fn run_fsm_with_socket(
         streamsockets_core::spawn_watchdog_heartbeat(Duration::from_secs(10));
     }
 
-    let queue = Arc::new(Mutex::new(ReconnectQueue::new(cfg.queue_max_bytes)));
+    let queue = Arc::new(Mutex::new(ReconnectQueue::new(
+        cfg.queue_max_bytes,
+        cfg.queue_max_packets,
+    )));
     let last_udp_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     // Bounded UDP-listener → FSM channel (spec §6.3 — was `unbounded` and could
@@ -289,15 +305,42 @@ async fn run_fsm_inner(
                         continue;
                     }
                     LiveExit::CloseTerminal(code) => {
-                        warn!(code, "received terminal close; entering Terminated");
-                        if !terminate(&cfg, &metrics, &account, &exit_code, &shutdown) {
-                            // Stay Idle waiting for new traffic per §6.5 ("else: stay Idle, log").
-                            return wait_idle_until_shutdown(&shutdown, &mut udp_rx).await;
+                        // §10.1: under the always-reconnect contract this is
+                        // no longer terminal. The log line is preserved (the
+                        // peer DID send a terminal-class code) but the
+                        // disposition is "exit-on-failure or reconnect".
+                        warn!(
+                            code,
+                            "received terminal close; routing through always-reconnect policy"
+                        );
+                        if handle_disconnect_should_exit(
+                            &cfg,
+                            &exit_code,
+                            &shutdown,
+                            &format!("terminal close code {code}"),
+                        ) {
+                            return Ok(());
                         }
-                        return Ok(());
+                        metrics
+                            .reconnect_attempts
+                            .with_label_values(&[&account])
+                            .inc();
                     }
                     LiveExit::Transient(reason) => {
+                        // §10.1: under the always-reconnect contract,
+                        // EXIT_ON_FAILURE=true exits on ANY disconnect —
+                        // not just CloseTerminal-class. A 1011, 1000,
+                        // TCP RST, or ping-timeout disconnect under
+                        // EXIT_ON_FAILURE=true also signals exit 1.
                         warn!(epoch, "tunnel disconnected: {reason}; reconnecting");
+                        if handle_disconnect_should_exit(
+                            &cfg,
+                            &exit_code,
+                            &shutdown,
+                            &format!("transient disconnect: {reason}"),
+                        ) {
+                            return Ok(());
+                        }
                         metrics
                             .reconnect_attempts
                             .with_label_values(&[&account])
@@ -307,14 +350,24 @@ async fn run_fsm_inner(
             }
             Err(e) => {
                 consecutive_failures += 1;
-                if e.is_terminal() {
-                    warn!("dial failed terminal: {e}");
-                    if !terminate(&cfg, &metrics, &account, &exit_code, &shutdown) {
-                        return wait_idle_until_shutdown(&shutdown, &mut udp_rx).await;
-                    }
+                // §10.1: under always-reconnect, EXIT_ON_FAILURE=true exits
+                // on ANY dial failure — terminal (401/403) and transient
+                // (TCP RST, ECONNREFUSED, TLS handshake fail, …) alike.
+                // The "terminal" classification is preserved only for the
+                // log message; the policy branch is the same.
+                let kind = if e.is_terminal() {
+                    "terminal"
+                } else {
+                    "transient"
+                };
+                if handle_disconnect_should_exit(
+                    &cfg,
+                    &exit_code,
+                    &shutdown,
+                    &format!("dial failed {kind}: {e}"),
+                ) {
                     return Ok(());
                 }
-                warn!("dial failed transient: {e}");
                 metrics
                     .reconnect_attempts
                     .with_label_values(&[&account])
@@ -330,9 +383,19 @@ async fn run_fsm_inner(
             .set(1.0);
 
         if consecutive_failures >= cfg.retry_budget {
-            warn!(consecutive_failures, "retry budget exhausted; terminating");
-            if !terminate(&cfg, &metrics, &account, &exit_code, &shutdown) {
-                return wait_idle_until_shutdown(&shutdown, &mut udp_rx).await;
+            // §10.1: RETRY_BUDGET is the only hard ceiling on a reconnect
+            // storm. When exhausted the worker exits — cleanly under
+            // EXIT_ON_FAILURE=false (exit code 0) or with code 1 under
+            // EXIT_ON_FAILURE=true. There is no "Idle-after-Terminated"
+            // state to fall into anymore.
+            warn!(
+                consecutive_failures,
+                "retry budget exhausted; worker exiting"
+            );
+            if cfg.exit_on_failure {
+                error!("EXIT_ON_FAILURE=true; signalling exit 1 across workers");
+                exit_code.store(1, Ordering::SeqCst);
+                shutdown.cancel();
             }
             return Ok(());
         }
@@ -360,6 +423,7 @@ async fn run_fsm_inner(
                                     .inc_by(dropped as f64);
                             }
                             metrics.queue_depth_bytes.with_label_values(&[&account]).set(q.len_bytes() as f64);
+                            metrics.queue_depth_packets.with_label_values(&[&account]).set(q.len_packets() as f64);
                         }
                         None => return Ok(()),
                     }
@@ -377,6 +441,10 @@ async fn run_fsm_inner(
                     .with_label_values(&[&account])
                     .set(0.0);
                 metrics
+                    .queue_depth_packets
+                    .with_label_values(&[&account])
+                    .set(0.0);
+                metrics
                     .queue_dropped
                     .with_label_values(&[&account, "drain_timeout"])
                     .inc_by(n as f64);
@@ -386,23 +454,6 @@ async fn run_fsm_inner(
     }
 
     Ok(())
-}
-
-async fn wait_idle_until_shutdown(
-    shutdown: &CancellationToken,
-    udp_rx: &mut tokio::sync::mpsc::Receiver<Bytes>,
-) -> anyhow::Result<()> {
-    let metrics = streamsockets_metrics::Metrics::global();
-    set_state(&metrics, State::Terminated);
-    info!("entering Idle-after-Terminated; awaiting shutdown");
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return Ok(()),
-            // Drain incoming UDP packets so the listener channel doesn't fill up.
-            _ = udp_rx.recv() => {}
-        }
-    }
 }
 
 enum LiveExit {
@@ -447,6 +498,10 @@ async fn run_live(
             }
             metrics
                 .queue_depth_bytes
+                .with_label_values(&[account])
+                .set(0.0);
+            metrics
+                .queue_depth_packets
                 .with_label_values(&[account])
                 .set(0.0);
             v
@@ -576,8 +631,31 @@ async fn run_live(
                             // fastwebsockets auto-pong handles this.
                         }
                         OpCode::Close => {
-                            let code = parse_close_code(frame.payload.as_ref());
+                            // (§3.1.1) Path A — peer (or intermediary) sent
+                            // a Close frame. Log the full payload so the
+                            // operator can chase what actually arrived
+                            // on the wire (proxy hiccup vs. server-asserted
+                            // close) without needing tcpdump.
+                            let payload = frame.payload.as_ref();
+                            let code = parse_close_code(payload);
+                            let reason = if payload.len() > 2 {
+                                String::from_utf8_lossy(&payload[2..]).into_owned()
+                            } else {
+                                String::new()
+                            };
+                            info!(
+                                code,
+                                reason = %reason,
+                                source = "wire",
+                                "received Close frame from peer"
+                            );
                             metrics.ws_close.with_label_values(&["server", &code.to_string()]).inc();
+                            // §10.1: under always-reconnect, 1003/1008/1002
+                            // are no longer wired to a separate terminal
+                            // policy here. The CloseTerminal variant is
+                            // preserved so the outer arm can log "received
+                            // terminal close" — the disposition is decided
+                            // there (EXIT_ON_FAILURE vs reconnect).
                             if matches!(code, 1003 | 1008 | 1002) {
                                 return LiveExit::CloseTerminal(code);
                             }
@@ -588,15 +666,39 @@ async fn run_live(
                             return LiveExit::CloseTerminal(1003);
                         }
                         OpCode::Continuation => {
+                            // FragmentCollector should have absorbed this;
+                            // a raw Continuation here is a peer protocol bug.
+                            // §3.1.2 source label so this is distinguishable
+                            // from a wire-level Close in operator logs.
+                            warn!(
+                                source = "local-decode",
+                                variant = "raw_continuation",
+                                "received raw Continuation opcode after FragmentCollector; \
+                                 synthesizing close code 1002"
+                            );
                             metrics.protocol_violations.with_label_values(&["continuation"]).inc();
                             return LiveExit::CloseTerminal(1002);
                         }
                     },
                     Err(e) => {
-                        // (Fix #21) Match on WebSocketError variants instead of
-                        // string-sniffing the Display output. Spec §5.3:
-                        // "Any other frame opcode (RSV bits set, unknown
-                        // opcode): close 1002 (Protocol Error)."
+                        // (Fix #21 / §3.1.2) Match on WebSocketError
+                        // variants instead of string-sniffing Display.
+                        // Spec §5.3: "Any other frame opcode (RSV bits set,
+                        // unknown opcode): close 1002 (Protocol Error)."
+                        //
+                        // §3.1.2 diagnostic upgrade: when fastwebsockets
+                        // returns a protocol-class decode error the client
+                        // historically *synthesized* a 1002 close code and
+                        // logged it identically to a wire-level Close(1002)
+                        // from the peer. Operators chasing the bug had no
+                        // way to tell Path A from Path B. We now:
+                        //   - log the exact variant (low-cardinality label),
+                        //   - mark `source = "local-decode"` so the log line
+                        //     is unambiguously distinct from §3.1.1's wire
+                        //     case,
+                        //   - label `protocol_violations` per-variant rather
+                        //     than the single bucket `"frame_format"`.
+                        let variant = ws_error_variant(&e);
                         let is_protocol = matches!(
                             &e,
                             WebSocketError::ReservedBitsNotZero
@@ -611,7 +713,23 @@ async fn run_live(
                                 | WebSocketError::InvalidUTF8
                         );
                         if is_protocol {
-                            metrics.protocol_violations.with_label_values(&["frame_format"]).inc();
+                            warn!(
+                                variant,
+                                error = %e,
+                                source = "local-decode",
+                                "WebSocket read returned a protocol-error variant; the close \
+                                 code reported to operators (1002) is synthesized by this client \
+                                 and NOT a wire-level Close from the peer"
+                            );
+                            metrics
+                                .protocol_violations
+                                .with_label_values(&[variant])
+                                .inc();
+                            // §10.1: under always-reconnect this still
+                            // flags the read as terminal-class (the
+                            // outer arm decides policy), but the §10.1
+                            // policy turns "terminal-class" into a
+                            // reconnect unless EXIT_ON_FAILURE=true.
                             return LiveExit::CloseTerminal(1002);
                         }
                         return LiveExit::Transient(format!("ws read: {e}"));
@@ -704,13 +822,15 @@ fn parse_close_code(payload: &[u8]) -> u16 {
 }
 
 fn set_state(metrics: &streamsockets_metrics::Metrics, s: State) {
+    // §10.1: `"terminal"` is intentionally absent — the Terminated state
+    // no longer exists in the FSM. Existing dashboards that selected on
+    // `state="terminal"` will see the series go absent (not flip to 0).
     for label in [
         "disconnected",
         "connecting",
         "authenticating",
         "live",
         "reconnecting",
-        "terminal",
     ] {
         metrics
             .client_state
@@ -719,37 +839,62 @@ fn set_state(metrics: &streamsockets_metrics::Metrics, s: State) {
     }
 }
 
-/// Returns `true` if the worker should return cleanly (EXIT_ON_FAILURE=true).
-/// Returns `false` if we should fall through to wait-Idle behavior per §6.5.
+/// §10.1 disconnect policy: returns `true` if the worker should return
+/// cleanly (`EXIT_ON_FAILURE=true`), `false` if the caller should fall
+/// through to the reconnect loop.
 ///
-/// Fix #2: previously this called `std::process::exit(1)` directly, which
-/// SIGKILLed peer workers mid-handshake and skipped their WS Close 1001.
-/// Now: stamp the shared exit code, fire the global cancel, and return so
-/// every worker drains gracefully. `main.rs` reads the exit code after all
-/// workers join.
-fn terminate(
+/// Replaces the v2.1.0 `terminate()` helper. Under always-reconnect there
+/// is no Terminated state to enter and no Idle-after-Terminated to wait in;
+/// the caller continues the outer loop on `false`.
+///
+/// Exit-on-failure propagation:
+///   - SeqCst store on `exit_code` so any later observer that reads it
+///     after observing `shutdown.is_cancelled()` is guaranteed to see 1.
+///     AcqRel would be enough on x86 but the cross-arch story is cleaner
+///     with SeqCst (matches Fix #2's original rationale).
+///   - `shutdown.cancel()` broadcasts to peer workers so their `select!`
+///     arms wake and they drain gracefully (no SIGKILL via `process::exit`).
+fn handle_disconnect_should_exit(
     cfg: &ClientConfig,
-    metrics: &streamsockets_metrics::Metrics,
-    account: &str,
     exit_code: &SharedExitCode,
     shutdown: &CancellationToken,
+    reason: &str,
 ) -> bool {
-    set_state(metrics, State::Terminated);
-    metrics
-        .reconnect_state
-        .with_label_values(&[account])
-        .set(2.0);
     if cfg.exit_on_failure {
-        error!("EXIT_ON_FAILURE=true; signalling exit 1 across workers");
-        // SeqCst: any later observer that reads `exit_code` after observing
-        // shutdown.is_cancelled() must see this store. AcqRel would be enough
-        // on x86 but the cross-arch story is cleaner with SeqCst.
+        error!(
+            reason,
+            "EXIT_ON_FAILURE=true; signalling exit 1 across workers"
+        );
         exit_code.store(1, Ordering::SeqCst);
         shutdown.cancel();
         return true;
     }
-    warn!("terminal but EXIT_ON_FAILURE=false; staying up Idle (spec §6.5)");
+    warn!(reason, "disconnect; reconnecting after backoff");
     false
+}
+
+/// Human-readable label for a `WebSocketError` variant. Low-cardinality
+/// (≤ ~12 values across the closed set) so it is safe to use as a
+/// Prometheus label value on `protocol_violations_total{reason}`.
+///
+/// Added in §3.1.2: previously the client logged every protocol decode
+/// error identically as "code 1002", indistinguishable from a wire-level
+/// Close(1002). The variant string makes Path A vs Path B
+/// distinguishable in both logs and metrics.
+fn ws_error_variant(e: &WebSocketError) -> &'static str {
+    match e {
+        WebSocketError::ReservedBitsNotZero => "reserved_bits_not_zero",
+        WebSocketError::InvalidFragment => "invalid_fragment",
+        WebSocketError::InvalidContinuationFrame => "invalid_continuation",
+        WebSocketError::ControlFrameFragmented => "control_frame_fragmented",
+        WebSocketError::PingFrameTooLarge => "ping_frame_too_large",
+        WebSocketError::FrameTooLarge => "frame_too_large",
+        WebSocketError::InvalidValue => "invalid_value",
+        WebSocketError::InvalidCloseFrame => "invalid_close_frame",
+        WebSocketError::InvalidCloseCode => "invalid_close_code",
+        WebSocketError::InvalidUTF8 => "invalid_utf8",
+        _ => "other",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

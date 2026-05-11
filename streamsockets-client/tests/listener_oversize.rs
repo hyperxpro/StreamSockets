@@ -42,6 +42,7 @@ fn cfg(udp_port: u16, max: usize) -> ClientConfig {
         udp_timeout_secs: 60,
         exit_on_failure: false,
         queue_max_bytes: 1 << 20,
+        queue_max_packets: 32,
         queue_drain_timeout_ms: 5000,
         threads: 1,
         max_frame_size: max,

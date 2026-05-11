@@ -11,7 +11,9 @@ use bytes::Bytes;
 #[tokio::test]
 async fn drop_oldest_under_overflow() {
     use streamsockets_client::queue::ReconnectQueue;
-    let mut q = ReconnectQueue::new(1024);
+    // usize::MAX packet cap so the existing byte-cap assertions remain
+    // testable independently of the new packet-cap behavior.
+    let mut q = ReconnectQueue::new(1024, usize::MAX);
     for i in 0..5000u32 {
         q.push(Bytes::copy_from_slice(&i.to_be_bytes()));
     }
@@ -35,7 +37,9 @@ async fn drop_oldest_under_overflow() {
 #[tokio::test]
 async fn purge_on_drain_timeout() {
     use streamsockets_client::queue::ReconnectQueue;
-    let mut q = ReconnectQueue::new(1024);
+    // usize::MAX packet cap so the existing byte-cap assertions remain
+    // testable independently of the new packet-cap behavior.
+    let mut q = ReconnectQueue::new(1024, usize::MAX);
     for _ in 0..100 {
         q.push(Bytes::from_static(b"frame"));
     }
