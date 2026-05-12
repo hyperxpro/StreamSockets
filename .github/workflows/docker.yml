@@ -57,7 +57,7 @@ jobs:
             ${{ matrix.image }}:${{ matrix.tag_suffix }}-latest
           provenance: true
           sbom: true
-      - uses: actions/attest-build-provenance@b3e506e8c389afc651c5bacf2b8f2a1ea0557215 # v4
+      - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           subject-name: docker.io/${{ matrix.image }}
